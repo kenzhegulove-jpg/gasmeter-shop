@@ -1,0 +1,34 @@
+# Запуск: cp .env.example .env  (заполнить), затем  docker compose up -d
+# Имя проекта закреплено: от него зависит имя тома с базой (gasmeter_pgdata).
+name: gasmeter
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gasmeter
+      POSTGRES_USER: gasmeter
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Задайте DB_PASSWORD в .env}
+      TZ: Asia/Almaty
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gasmeter -d gasmeter"]
+      interval: 10s
+      retries: 5
+    # Порт БД наружу не публикуется: база доступна только приложению
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://gasmeter:${DB_PASSWORD}@db:5432/gasmeter
+      TRUST_PROXY: ${TRUST_PROXY:-172.16.0.0/12}
+      TZ: Asia/Almaty
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"   # доступ только через nginx на этом же сервере
+volumes:
+  pgdata:

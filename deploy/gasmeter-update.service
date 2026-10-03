@@ -1,0 +1,10 @@
+[Unit]
+Description=Автообновление сайта продажи счетчиков газа из GitHub
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=deploy
+WorkingDirectory=/opt/gasmeter
+ExecStart=/opt/gasmeter/scripts/auto-update.sh

@@ -132,6 +132,117 @@ test('вход сотрудника блокируется после 5 неуд
   assert.strictEqual(r.data.code, 'locked'); // даже верный пароль — до истечения 60 минут
 });
 
+test('остатки: бронь, защита последней штуки, выдача, возврат в остаток', async () => {
+  // Админ уже вошёл в первом тесте, но вход мог быть заблокирован тестом блокировки — входим заново через новую сессию
+  await q("UPDATE users SET failed_logins=0, locked_until=NULL WHERE login='admin'");
+  let r = await call('adm2', 'POST', '/api/auth/login', { login: 'admin', password: 'Adm1n#Strong!', captchaId: await captcha(), captchaText: 'TEST' });
+  assert.strictEqual(r.status, 200);
+  const fd = new FormData();
+  fd.append('folder', 'stock');
+  fd.append('files', new Blob([await makeRegistry([
+    { owner: 'Остатков Олег Олегович', address: 'Астана г., ул. Складская, 1', iin: '850101300111', number: '01-гор-2026-000005001' },
+    { owner: 'Бронина Бэлла Борисовна', address: 'Астана г., ул. Складская, 2', iin: '860101400222', number: '01-гор-2026-000005002' },
+    { owner: 'ТОО "Юрлицо"', address: 'Астана г., ул. Складская, 3', iin: '200740021049', number: '01-гор-2026-000005003' },
+  ])]), 'stock.xlsx');
+  r = await call('adm2', 'POST', '/api/admin/tu/import', undefined, fd);
+  assert.strictEqual(r.data.added, 3);
+
+  // Включаем учёт; остатков нет → товара нет в наличии, точек для выдачи нет
+  r = await call('adm2', 'PUT', '/api/admin/settings', { stockEnabled: true });
+  assert.strictEqual(r.data.stockEnabled, true);
+  r = await call('anon', 'GET', '/api/catalog');
+  assert.strictEqual(r.data[0].inStock, false);
+  r = await call('anon', 'GET', '/api/points?productId=1');
+  assert.strictEqual(r.data.points.length, 0);
+  const check = async (iin, tu6) => (await call('anon', 'POST', '/api/check', { iin, tu6, captchaId: await captcha(), captchaText: 'TEST' })).data;
+  let c1 = await check('850101300111', '005001');
+  r = await call('anon', 'POST', '/api/orders', { ticket: c1.options[0].ticket, productId: 1, pointId: 1, confirmed: true });
+  assert.strictEqual(r.data.code, 'out_of_stock');
+
+  // Приход 1 шт. → один заказ проходит, второй (другое ТУ) — уже нет
+  r = await call('adm2', 'POST', '/api/admin/stock/receipt', { pointId: 1, productId: 1, qty: 1, comment: 'накладная 1' });
+  assert.strictEqual(r.data.balance, 1);
+  r = await call('anon', 'GET', '/api/points?productId=1');
+  assert.strictEqual(r.data.points[0].available, 1);
+  r = await call('anon', 'POST', '/api/orders', { ticket: c1.options[0].ticket, productId: 1, pointId: 1, confirmed: true });
+  assert.strictEqual(r.status, 201);
+  const num = r.data.num;
+  const c2 = await check('860101400222', '005002');
+  r = await call('anon', 'POST', '/api/orders', { ticket: c2.options[0].ticket, productId: 1, pointId: 1, confirmed: true });
+  assert.strictEqual(r.data.code, 'out_of_stock');
+  r = await call('anon', 'GET', '/api/catalog');
+  assert.strictEqual(r.data[0].inStock, false); // 1 на складе, 1 в брони
+
+  // Выдача списывает остаток
+  await call('seller', 'POST', `/api/seller/orders/${num}/pay`, { receiptNumber: '901' });
+  r = await call('seller', 'POST', `/api/seller/orders/${num}/issue`, { serialNumber: 'ST-1', checklist: { id: true, passport: true, stamp: true, sticker: true } });
+  assert.strictEqual(r.data.status, 'issued');
+  r = await call('adm2', 'GET', '/api/admin/stock');
+  let cell = r.data.cells.find(x => x.point_id === 1 && x.product_id === 1);
+  assert.deepStrictEqual([cell.on_hand, cell.reserved, cell.available], [0, 0, 0]);
+
+  // Отчёты продавца и реестр продаж
+  r = await call('seller', 'GET', '/api/seller/summary');
+  assert.ok(r.data.kpi.issued >= 1);
+  assert.ok(r.data.stock.length >= 1);
+  r = await call('seller', 'GET', '/api/seller/sales');
+  assert.ok(r.data.rows.some(o => o.num === num));
+  r = await call('seller', 'GET', '/api/seller/sales/export.xlsx');
+  assert.strictEqual(r.status, 200);
+  r = await call('adm2', 'GET', '/api/admin/sales?q=ST-1');
+  assert.strictEqual(r.data.rows.length, 1);
+  r = await call('adm2', 'GET', '/api/admin/sales/export.xlsx');
+  assert.strictEqual(r.status, 200);
+
+  // Возврат: неисправный — не в остаток; исправный — в остаток
+  r = await call('seller', 'GET', '/api/seller/returns/find?serial=ST-1');
+  assert.strictEqual(r.data.stockTracked, true);
+  r = await call('seller', 'POST', `/api/seller/orders/${num}/return`, { reason: 'Отказ покупателя', returnToStock: true, confirmed: true });
+  assert.strictEqual(r.data.returnedToStock, true);
+  r = await call('adm2', 'GET', '/api/admin/stock');
+  cell = r.data.cells.find(x => x.point_id === 1 && x.product_id === 1);
+  assert.strictEqual(cell.on_hand, 1);
+
+  // Корректировка остатка и журнал движений
+  r = await call('adm2', 'POST', '/api/admin/stock/correction', { pointId: 1, productId: 1, actual: 7, comment: 'инвентаризация' });
+  assert.strictEqual(r.data.balance, 7);
+  r = await call('adm2', 'GET', '/api/admin/stock/moves');
+  assert.deepStrictEqual(r.data.map(m => m.reason).slice(0, 4), ['correction', 'return', 'issue', 'receipt']);
+
+  // Настройка «продажа юрлицам»
+  await call('adm2', 'PUT', '/api/admin/settings', { allowLegalEntities: false });
+  assert.strictEqual((await check('200740021049', '005003')).code, 'legal');
+  await call('adm2', 'PUT', '/api/admin/settings', { allowLegalEntities: true });
+  assert.ok((await check('200740021049', '005003')).options);
+
+  // QR-код сайта
+  r = await call('adm2', 'GET', '/api/admin/site-qr.pdf');
+  assert.strictEqual(r.status, 200);
+  r = await call('adm2', 'GET', '/api/admin/site-qr.svg');
+  assert.ok(String(r.data).includes('<svg'));
+  await call('adm2', 'PUT', '/api/admin/settings', { stockEnabled: false });
+});
+
+test('остатки: одновременные заказы последней штуки — продаётся ровно одна', async () => {
+  const fd = new FormData();
+  fd.append('folder', 'race');
+  const regs = Array.from({ length: 5 }, (_, i) => ({ owner: `Гонкин Гарри ${i}`, address: `Астана г., ул. Гонок, ${i}`, iin: `90020130${String(i).padStart(4, '0')}`, number: `01-гор-2026-00000${6000 + i}` }));
+  fd.append('files', new Blob([await makeRegistry(regs)]), 'race.xlsx');
+  await call('adm2', 'POST', '/api/admin/tu/import', undefined, fd);
+  await call('adm2', 'PUT', '/api/admin/settings', { stockEnabled: true });
+  const st = (await call('adm2', 'GET', '/api/admin/stock')).data.cells.find(x => x.point_id === 1 && x.product_id === 1);
+  await call('adm2', 'POST', '/api/admin/stock/correction', { pointId: 1, productId: 1, actual: st.reserved + 1, comment: 'ровно одна свободная' });
+  const tickets = [];
+  for (const t of regs) {
+    const r = await call('anon', 'POST', '/api/check', { iin: t.iin, tu6: t.number.slice(-6), captchaId: await captcha(), captchaText: 'TEST' });
+    tickets.push(r.data.options[0].ticket);
+  }
+  const results = await Promise.all(tickets.map(ticket => call('anon', 'POST', '/api/orders', { ticket, productId: 1, pointId: 1, confirmed: true })));
+  assert.strictEqual(results.filter(r => r.status === 201).length, 1);
+  assert.strictEqual(results.filter(r => r.data.code === 'out_of_stock').length, 4);
+  await call('adm2', 'PUT', '/api/admin/settings', { stockEnabled: false });
+});
+
 test('CSRF: запрос без заголовка отклоняется', async () => {
   const r = await fetch(base + '/api/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   assert.strictEqual(r.status, 403);

@@ -8,6 +8,8 @@ const { lockedFor, registerFail, resetFails } = require('../security/locks');
 const { expirePending, getOrder, publicOrder, signTicket, verifyTicket } = require('../orders');
 const { orderPdf, orderQrSvg } = require('../pdf');
 const { REGION_ORDER } = require('../regions');
+const { getSettings } = require('../settings');
+const { availabilityByPoint, availabilityByProduct, lockAvailable } = require('../stock');
 
 const r = express.Router();
 
@@ -17,6 +19,12 @@ r.get('/catalog', async (_req, res) => {
            COALESCE(array_agg(ph.position ORDER BY ph.position) FILTER (WHERE ph.id IS NOT NULL), '{}') AS photos
     FROM products p LEFT JOIN product_photos ph ON ph.product_id = p.id
     WHERE p.active GROUP BY p.id ORDER BY p.sort, p.id`);
+  const s = await getSettings();
+  if (s.stockEnabled) {
+    await expirePending();
+    const av = await availabilityByProduct();
+    for (const p of rows) { p.available = av.get(p.id) || 0; p.inStock = p.available > 0; }
+  } else rows.forEach(p => { p.inStock = true; });
   res.json(rows);
 });
 
@@ -26,9 +34,17 @@ r.get('/products/:id/photos/:pos', async (req, res) => {
   res.set('Content-Type', rows[0].mime).set('Cache-Control', 'public, max-age=300').send(rows[0].data);
 });
 
-r.get('/points', async (_req, res) => {
-  const { rows } = await q('SELECT id, region, address, hours FROM points WHERE active ORDER BY address');
-  res.json({ regions: REGION_ORDER, points: rows });
+/** Точки выдачи; с productId и включённым учётом остатков — только точки, где товар есть в наличии */
+r.get('/points', async (req, res) => {
+  let { rows } = await q('SELECT id, region, address, hours FROM points WHERE active ORDER BY address');
+  const s = await getSettings();
+  const productId = Number(req.query.productId) || 0;
+  if (s.stockEnabled && productId) {
+    await expirePending();
+    const av = await availabilityByPoint(productId);
+    rows = rows.filter(p => (av.get(p.id) || 0) > 0).map(p => ({ ...p, available: av.get(p.id) }));
+  }
+  res.json({ regions: REGION_ORDER, points: rows, stockEnabled: s.stockEnabled });
 });
 
 r.get('/captcha', async (_req, res) => {
@@ -63,11 +79,12 @@ r.post('/check', async (req, res) => {
   }
   await resetFails('check_iin', iin);
   await expirePending();
+  const settings = await getSettings();
 
   const options = [];
   let reason = null;
   for (const t of rows) {
-    if (t.is_legal && !config.allowLegalEntities) { reason = reason || 'legal'; continue; }
+    if (t.is_legal && !settings.allowLegalEntities) { reason = reason || 'legal'; continue; }
     if (config.maxGasFlow != null && t.gas_flow != null && t.gas_flow > config.maxGasFlow) { reason = reason || 'gas'; continue; }
     const a = await q("SELECT status, CEIL(EXTRACT(EPOCH FROM (expires_at - now()))/60)::int AS min_left FROM orders WHERE tu_number=$1 AND status IN ('pending','paid','issued')", [t.tu_number]);
     if (a.rows[0]) { reason = a.rows[0].status === 'pending' ? { pending: a.rows[0].min_left } : reason || 'bought'; continue; }
@@ -96,6 +113,13 @@ r.post('/orders', async (req, res) => {
     if (!p) throw bad('Товар недоступен', 'product');
     const pt = (await c.query('SELECT id FROM points WHERE id=$1 AND active', [pointId])).rows[0];
     if (!pt) throw bad('Выберите точку выдачи', 'point');
+    const t = (await c.query('SELECT is_legal FROM tu_records WHERE tu_number=$1', [tu])).rows[0];
+    const settings = await getSettings(c);
+    if (t?.is_legal && !settings.allowLegalEntities) throw new HttpError(403, 'Покупка по ТУ, выданным юридическим лицам, недоступна.', 'legal');
+    if (settings.stockEnabled) {
+      const st = await lockAvailable(c, pt.id, p.id);
+      if (st.available <= 0) throw new HttpError(409, 'На выбранной точке этот счетчик закончился. Выберите другую точку.', 'out_of_stock');
+    }
     try {
       const ins = await c.query(`INSERT INTO orders (token, product_id, product_name, tu_number, point_id, price, status, expires_at, buyer_ip)
         VALUES ($1,$2,$3,$4,$5,$6,'pending', now() + make_interval(mins => $7), $8) RETURNING num, token`,

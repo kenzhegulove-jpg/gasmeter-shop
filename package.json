@@ -1,6 +1,6 @@
 {
   "name": "gasmeter-shop",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Сайт контролируемой продажи счетчиков газа",
   "main": "src/server.js",
   "scripts": {

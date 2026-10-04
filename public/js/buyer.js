@@ -39,7 +39,7 @@ function vCatalog() {
     ${items.length ? `<div class="grid">${items.map(p => `
       <a class="pcard" href="#/p/${p.id}" style="text-decoration:none">
         <div class="pimg">${productImg(p)}</div>
-        <div class="pbody"><span class="tag">Цена для населения</span><span class="pname">${esc(p.name)}</span><span class="price">${fmt(p.price)} ₸<small>с НДС</small></span></div>
+        <div class="pbody">${p.inStock ? '<span class="tag">Цена для населения</span>' : '<span class="tag out">Нет в наличии</span>'}<span class="pname">${esc(p.name)}</span><span class="price">${fmt(p.price)} ₸<small>с НДС</small></span></div>
       </a>`).join('')}</div>`
       : `<div class="card" style="text-align:center">${S.catalog.length ? `<p>По запросу «${esc(S.q)}» ничего не найдено.</p><button class="btn ghost" data-act="clearQ">Показать все счетчики</button>` : '<p class="muted">Счетчики скоро появятся в продаже.</p>'}</div>`}
   </main>`;
@@ -58,7 +58,7 @@ function vProduct(p) {
     ${p.specs?.length ? `<div class="card"><h2 class="h3">Характеристики</h2><dl class="kv">${p.specs.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl></div>` : ''}
     ${p.description ? `<div class="card"><h2 class="h3">Описание</h2><p>${esc(p.description)}</p></div>` : ''}
   </main>
-  <div class="sticky-cta"><div class="in"><div class="price">${fmt(p.price)} ₸</div><a class="btn" href="#/buy/${p.id}">Купить</a></div></div>`;
+  <div class="sticky-cta"><div class="in"><div class="price">${fmt(p.price)} ₸</div>${p.inStock ? `<a class="btn" href="#/buy/${p.id}">Купить</a>` : '<button class="btn" disabled>Нет в наличии</button>'}</div></div>`;
 }
 function bindGallery() {
   const gal = $('#gal'); if (!gal) return;
@@ -114,6 +114,11 @@ function vPoint(p) {
   const other = [...new Set(pts.map(x => x.region))].filter(r => !regs.includes(r));
   const list = pts.filter(x => x.region === c.region);
   const sp = pts.find(x => x.id === c.pointId);
+  if (!pts.length) {
+    return `${head('Оформление заказа', `#/buy/${p.id}`, 2)}<main class="narrow">${mini(p)}
+      ${msgBox('warn', 'Этот счетчик закончился на всех точках', 'Выберите другой счетчик в каталоге или зайдите позже: остатки пополняются.')}
+      <a class="btn sec block" style="margin-top:14px" href="#/">В каталог</a></main>`;
+  }
   return `${head('Оформление заказа', `#/buy/${p.id}`, 2)}<main class="narrow">${mini(p)}
     <div class="card">
       <h2 class="h3">Точка продажи и выдачи</h2>
@@ -123,7 +128,7 @@ function vPoint(p) {
           <optgroup label="Области">${opts(S.points.regions.oblasts)}${other.map(r => `<option ${c.region === r ? 'selected' : ''}>${esc(r)}</option>`).join('')}</optgroup></select></div>
       <div class="field" style="margin-bottom:0"><label for="pt">Адрес точки</label>
         <select class="input" id="pt" data-ch="point" ${c.region ? '' : 'disabled'}><option value="">${c.region ? 'Выберите адрес' : 'Сначала выберите регион'}</option>
-          ${list.map(x => `<option value="${x.id}" ${c.pointId === x.id ? 'selected' : ''}>${esc(x.address)}</option>`).join('')}</select></div>
+          ${list.map(x => `<option value="${x.id}" ${c.pointId === x.id ? 'selected' : ''}>${esc(x.address)}${S.points.stockEnabled && x.available <= 5 ? ` — осталось ${x.available} шт.` : ''}</option>`).join('')}</select></div>
       ${sp ? msgBox('info', `${sp.region}, ${sp.address}`, `${sp.hours ? sp.hours + '. ' : ''}Возьмите с собой удостоверение личности.`) : ''}
     </div>
     <div class="card"><h2 class="h3">Адрес установки счетчика</h2>
@@ -171,7 +176,8 @@ function vOrder(o, token) {
 
 /* ---------- Роутер ---------- */
 async function ensureData() {
-  if (!S.catalog) S.catalog = await GET('/api/catalog');
+  // Каталог (с наличием) обновляется не реже раза в минуту
+  if (!S.catalog || Date.now() - (S.catalogAt || 0) > 60000) { S.catalog = await GET('/api/catalog'); S.catalogAt = Date.now(); }
 }
 async function route() {
   clearInterval(S.pollTimer);
@@ -186,7 +192,8 @@ async function route() {
       render(vCheck(prod(h[1])));
       loadCaptcha('#capBox', '#cap').catch(handleError);
     } else if (h[0] === 'point' && S.co?.option) {
-      if (!S.points) S.points = await GET('/api/points');
+      S.points = await GET(`/api/points?productId=${S.co.productId}`);
+      if (S.co.pointId && !S.points.points.some(x => x.id === S.co.pointId)) S.co.pointId = null;
       render(vPoint(prod(S.co.productId)));
     } else { if (location.hash && location.hash !== '#/') history.replaceState(null, '', '#/'); render(vCatalog()); }
     window.scrollTo(0, 0);
@@ -253,6 +260,7 @@ bindEvents({
         location.hash = `#/order/${r.num}/${encodeURIComponent(r.token)}`;
       } catch (e) {
         $('#orderErr').innerHTML = msgBox('err', 'Заказ не оформлен', e.message);
+        if (e.code === 'out_of_stock') setTimeout(() => { closeModal(); S.co.pointId = null; S.catalog = null; route(); }, 2500);
         if (e.code === 'ticket') setTimeout(() => { closeModal(); location.hash = `#/buy/${S.co.productId}`; S.co.options = null; S.co.option = null; route(); }, 2500);
       }
     });

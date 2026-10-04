@@ -175,3 +175,42 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS audit_log_created ON audit_log (created_at DESC);
+
+-- ===== v1.2.0: настройки, остатки по точкам, реестр продаж =====
+
+-- Настройки, которые администратор меняет в кабинете (ключ → значение)
+CREATE TABLE IF NOT EXISTS settings (
+  key        text PRIMARY KEY,
+  value      jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  updated_by int REFERENCES users(id)
+);
+
+-- Остаток товара на точке (физически на складе точки, включая забронированные)
+CREATE TABLE IF NOT EXISTS stock (
+  point_id   int NOT NULL REFERENCES points(id),
+  product_id int NOT NULL REFERENCES products(id),
+  on_hand    int NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (point_id, product_id)
+);
+
+-- Движение остатков: приход, корректировка, выдача, возврат
+CREATE TABLE IF NOT EXISTS stock_moves (
+  id         bigserial PRIMARY KEY,
+  point_id   int NOT NULL REFERENCES points(id),
+  product_id int NOT NULL REFERENCES products(id),
+  delta      int NOT NULL,
+  balance    int NOT NULL,
+  reason     text NOT NULL CHECK (reason IN ('receipt', 'correction', 'issue', 'return')),
+  order_num  bigint,
+  user_id    int REFERENCES users(id),
+  comment    text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS stock_moves_created ON stock_moves (created_at DESC);
+CREATE INDEX IF NOT EXISTS stock_moves_order ON stock_moves (order_num) WHERE order_num IS NOT NULL;
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS return_to_stock boolean;
+CREATE INDEX IF NOT EXISTS orders_issued_at ON orders (issued_at DESC) WHERE issued_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS orders_point_product_active ON orders (point_id, product_id) WHERE status IN ('pending', 'paid');

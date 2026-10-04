@@ -328,3 +328,6 @@ a.btn{color:#fff}
 a.btn.sec,a.btn.ghost{color:var(--brand-ink)}
 a.btn.line{color:var(--ink)}
 .logo{text-decoration:none;color:inherit}
+.tag.out{background:#EEF0F2;color:#4F5B65}
+.switch{align-items:flex-start}
+.switch input{flex:none;margin-top:2px}

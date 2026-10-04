@@ -38,6 +38,9 @@ const config = {
 
   posApiKey: env.POS_API_KEY || '',
 
+  // Адрес сайта для QR-кода (по умолчанию — адрес, по которому открыт кабинет)
+  siteUrl: (env.SITE_URL || '').replace(/\/+$/, ''),
+
   admin: { login: env.ADMIN_LOGIN || 'admin', password: env.ADMIN_INITIAL_PASSWORD || '' },
 };
 

@@ -10,6 +10,11 @@ const { parseRegistry } = require('../tu-import');
 const { expirePending } = require('../orders');
 const { isRegion } = require('../regions');
 const { audit } = require('../audit');
+const config = require('../config');
+const { getSettings, updateSettings } = require('../settings');
+const { stockMatrix, moveStock } = require('../stock');
+const { parseFilters, salesPage, salesWorkbook } = require('../sales');
+const { siteQrSvg, siteQrPng, siteQrPoster } = require('../site-qr');
 
 const r = express.Router();
 r.use(requireRole('admin'));
@@ -296,6 +301,89 @@ r.get('/reports/export.xlsx', async (req, res) => {
     .set('Content-Disposition', `attachment; filename="orders_${p[0]}_${p[1]}.xlsx"`);
   await wb.xlsx.write(res);
   res.end();
+});
+
+/* ---------- Настройки ---------- */
+r.get('/settings', async (_req, res) => res.json(await getSettings()));
+r.put('/settings', async (req, res) => {
+  const changed = await updateSettings(req.body || {}, req.user.id);
+  if (changed.length) await audit(req, 'settings_update', 'settings', null, Object.fromEntries(changed.map(c => [c.key, `${c.from} → ${c.to}`])));
+  res.json(await getSettings());
+});
+
+/* ---------- Остатки по точкам ---------- */
+r.get('/stock', async (_req, res) => {
+  await expirePending();
+  const s = await getSettings();
+  const points = (await q('SELECT id, region, address FROM points WHERE active ORDER BY region, address')).rows;
+  const products = (await q('SELECT id, name FROM products WHERE active ORDER BY sort, id')).rows;
+  res.json({ settings: s, points, products, cells: await stockMatrix() });
+});
+
+async function stockTarget(b) {
+  const pointId = Number(b.pointId) || 0, productId = Number(b.productId) || 0;
+  const ok = (await q('SELECT (SELECT active FROM points WHERE id=$1) AS pt, (SELECT active FROM products WHERE id=$2) AS pr', [pointId, productId])).rows[0];
+  if (!ok.pt) throw bad('Выберите действующую точку', 'point');
+  if (!ok.pr) throw bad('Выберите товар', 'product');
+  return { pointId, productId };
+}
+r.post('/stock/receipt', async (req, res) => {
+  const t = await stockTarget(req.body || {});
+  const qty = Math.round(Number(req.body?.qty));
+  if (!(qty >= 1 && qty <= 100000)) throw bad('Количество — от 1 до 100 000', 'qty');
+  const comment = str(req.body?.comment, 300) || null;
+  const balance = await tx(c => moveStock(c, { ...t, delta: qty, reason: 'receipt', userId: req.user.id, comment }));
+  await audit(req, 'stock_receipt', 'stock', `${t.pointId}/${t.productId}`, { qty, balance });
+  res.json({ balance });
+});
+r.post('/stock/correction', async (req, res) => {
+  const t = await stockTarget(req.body || {});
+  const actual = Math.round(Number(req.body?.actual));
+  if (!(actual >= 0 && actual <= 100000)) throw bad('Фактический остаток — от 0 до 100 000', 'actual');
+  const comment = str(req.body?.comment, 300);
+  if (!comment) throw bad('Укажите причину корректировки', 'comment');
+  const balance = await tx(async c => {
+    await c.query('INSERT INTO stock (point_id, product_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [t.pointId, t.productId]);
+    const cur = (await c.query('SELECT on_hand FROM stock WHERE point_id=$1 AND product_id=$2 FOR UPDATE', [t.pointId, t.productId])).rows[0].on_hand;
+    if (cur === actual) throw bad('Фактический остаток совпадает с учётным', 'same');
+    return moveStock(c, { ...t, delta: actual - cur, reason: 'correction', userId: req.user.id, comment });
+  });
+  await audit(req, 'stock_correction', 'stock', `${t.pointId}/${t.productId}`, { actual, comment });
+  res.json({ balance });
+});
+r.get('/stock/moves', async (req, res) => {
+  const pointId = Number(req.query.pointId) || null;
+  const { rows } = await q(`SELECT m.*, pt.region AS point_region, pt.address AS point_address, pr.name AS product_name, u.full_name AS user_name
+    FROM stock_moves m JOIN points pt ON pt.id=m.point_id JOIN products pr ON pr.id=m.product_id LEFT JOIN users u ON u.id=m.user_id
+    ${pointId ? 'WHERE m.point_id=$1' : ''} ORDER BY m.created_at DESC LIMIT 200`, pointId ? [pointId] : []);
+  res.json(rows);
+});
+
+/* ---------- Реестр продаж ---------- */
+r.get('/sales', async (req, res) => res.json(await salesPage(parseFilters(req.query))));
+r.get('/sales/export.xlsx', async (req, res) => {
+  const f = parseFilters(req.query);
+  let title = 'Реестр продаж счетчиков газа: все точки';
+  if (f.pointId) { const pt = (await q('SELECT region, address FROM points WHERE id=$1', [f.pointId])).rows[0]; if (pt) title = `Реестр продаж: ${pt.region}, ${pt.address}`; }
+  const { wb, count } = await salesWorkbook(f, title);
+  await audit(req, 'sales_export', 'report', null, { from: f.from, to: f.to, pointId: f.pointId, rows: count });
+  res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    .set('Content-Disposition', `attachment; filename="sales_${f.from}_${f.to}.xlsx"`);
+  await wb.xlsx.write(res);
+  res.end();
+});
+
+/* ---------- QR-код сайта для точек продаж ---------- */
+const siteUrl = req => config.siteUrl || `${req.protocol}://${req.get('host')}`;
+r.get('/site-qr', (req, res) => res.json({ url: siteUrl(req) }));
+r.get('/site-qr.svg', async (req, res) => {
+  res.set('Content-Type', 'image/svg+xml').set('Content-Disposition', 'attachment; filename="qr-site.svg"').send(await siteQrSvg(siteUrl(req)));
+});
+r.get('/site-qr.png', async (req, res) => {
+  res.set('Content-Type', 'image/png').set('Content-Disposition', 'attachment; filename="qr-site.png"').send(await siteQrPng(siteUrl(req)));
+});
+r.get('/site-qr.pdf', async (req, res) => {
+  res.set('Content-Type', 'application/pdf').set('Content-Disposition', 'attachment; filename="qr-site-poster.pdf"').send(await siteQrPoster(siteUrl(req)));
 });
 
 /* ---------- Журнал действий ---------- */

@@ -3,6 +3,7 @@
 const Seller = {
   tab: 'search', q: '', results: null, order: null, f: null, done: false,
   retQ: '', ret: null, retErr: null,
+  rFrom: null, rTo: null, rPage: 0, rQ: '',
   async start() { this.tab = 'search'; await this.show(); },
 
   shell(content, title, extra = '') {
@@ -13,6 +14,7 @@ const Seller = {
       <nav class="bottomnav"><div class="in">
         <button class="${t === 'search' || t === 'order' ? 'on' : ''}" data-act="sTab" data-t="search">${ic('qr', 22)}Выдача</button>
         <button class="${t === 'return' ? 'on' : ''}" data-act="sTab" data-t="return">${ic('ret', 22)}Возврат</button>
+        <button class="${t === 'reports' ? 'on' : ''}" data-act="sTab" data-t="reports">${ic('chart', 22)}Отчеты</button>
         <button class="${t === 'profile' ? 'on' : ''}" data-act="sTab" data-t="profile">${ic('user', 22)}Профиль</button></div></nav>`;
   },
   row: o => `<button class="orow" data-act="sOpen" data-n="${o.num}"><div class="main"><b>№ ${o.num}</b><div class="sub">${esc(o.ownerName)} · ${esc(o.productName)}</div></div>${pill(o.status)}${ic('chev', 18)}</button>`,
@@ -31,6 +33,7 @@ const Seller = {
           ${active.length ? `<div class="olist">${active.map(this.row).join('')}</div>` : '<div class="card muted sm">Сейчас нет заказов, ожидающих выдачи.</div>'}`, 'Выдача заказа'));
       } else if (this.tab === 'order') this.renderOrder();
       else if (this.tab === 'return') this.renderReturn();
+      else if (this.tab === 'reports') await this.renderReports();
       else if (this.tab === 'profile') render(this.shell(`
           <div class="card"><div class="person"><span class="avatar">${esc((Staff.me.fullName.split(' ')[1] || Staff.me.fullName)[0])}</span><div><b>${esc(Staff.me.fullName)}</b><div class="muted sm">Продавец, логин ${esc(Staff.me.login)}</div></div></div></div>
           ${credForm(false)}
@@ -126,8 +129,9 @@ const Seller = {
     if (this.retErr) body = msgBox('err', 'Счетчик не найден', this.retErr);
     else if (o) body = `<div class="card" style="margin-top:14px">
         <dl class="kv"><dt>Товар</dt><dd>${esc(o.productName)}</dd><dt>Серийный номер</dt><dd>${esc(o.serialNumber)}</dd><dt>Заказ</dt><dd>№ ${o.num}</dd><dt>Владелец ТУ</dt><dd>${esc(o.ownerFullName)}</dd><dt>Номер ТУ</dt><dd>${esc(o.tuNumber)}</dd><dt>Выдан</dt><dd>${fmtDT(o.issuedAt)}<br><span class="muted sm">${esc(o.point.address)}</span></dd></dl></div>
-      <div class="card"><div class="field"><label for="rr">Причина возврата</label><select class="input" id="rr"><option>Неисправность счетчика</option><option>Отказ покупателя</option><option>Ошибка при выдаче</option><option>Другое</option></select></div>
+      <div class="card"><div class="field"><label for="rr">Причина возврата</label><select class="input" id="rr" data-ch="sRr"><option>Неисправность счетчика</option><option>Отказ покупателя</option><option>Ошибка при выдаче</option><option>Другое</option></select></div>
         <div class="field"><label for="rc">Комментарий</label><textarea class="input" id="rc" maxlength="1000" placeholder="Обязателен, если выбрано «Другое»"></textarea></div>
+        <label class="check hide" id="rstockWrap" style="border:0;padding-top:0"><input type="checkbox" id="rstock"><span>Счетчик исправен — вернуть в остаток точки<small>Неисправный счетчик в остаток не возвращается</small></span></label>
         <label class="check" style="border:0;padding-top:0"><input type="checkbox" id="rchk" data-ch="sRetChk"><span>Счетчик, паспорт и кассовый чек приняты, деньги возвращены через кассу</span></label>
         <div id="rerr"></div>
         <button class="btn danger block" id="rbtn" data-act="sReturn" disabled style="margin-top:8px">Оформить возврат</button>
@@ -136,6 +140,37 @@ const Seller = {
       <div class="input-row"><input class="input" id="rq" data-in="sRetQ" placeholder="Серийный номер" value="${esc(this.retQ)}" autocapitalize="characters" aria-label="Серийный номер"><button class="btn sec" data-act="sScanRet" aria-label="Сканировать штрих-код">${ic('barcode', 22)}</button><button class="btn" data-act="sRetFind" aria-label="Найти">${ic('search', 20)}</button></div>
       ${body}`, 'Возврат счетчика'));
   },
+  period(days) {
+    const d = n => new Date(Date.now() + 5 * 3600000 - n * 86400000).toISOString().slice(0, 10);
+    this.rFrom = d(days); this.rTo = d(0); this.rPage = 0;
+  },
+  async renderReports() {
+    if (!this.rFrom) this.period(0);
+    const qs = `from=${this.rFrom}&to=${this.rTo}`;
+    const [s, sales] = await Promise.all([GET(`/api/seller/summary?${qs}`), GET(`/api/seller/sales?${qs}&page=${this.rPage}&q=${encodeURIComponent(this.rQ)}`)]);
+    const k = s.kpi, t = sales.totals;
+    const today = new Date(Date.now() + 5 * 3600000).toISOString().slice(0, 10);
+    const chip = (days, label) => { const on = this.rTo === today && this.rFrom === new Date(Date.now() + 5 * 3600000 - days * 86400000).toISOString().slice(0, 10); return `<button class="${on ? 'on' : ''}" data-act="sPeriod" data-d="${days}">${label}</button>`; };
+    const kpi = (label, v) => `<div class="kpi"><span>${label}</span><b>${v}</b></div>`;
+    const pages = Math.ceil(t.count / sales.pageSize);
+    render(this.shell(`
+      <div class="chipset" style="margin-bottom:10px">${chip(0, 'Сегодня')}${chip(6, '7 дней')}${chip(29, '30 дней')}</div>
+      <div class="date-range" style="margin-bottom:14px;justify-content:space-between"><input type="date" data-ch="sFrom" value="${this.rFrom}" max="${today}" aria-label="С"><span class="muted">—</span><input type="date" data-ch="sTo" value="${this.rTo}" max="${today}" aria-label="По"></div>
+      <div class="kpis" style="grid-template-columns:1fr 1fr">
+        ${kpi('Выдано, шт.', k.issued)}${kpi('Сумма, ₸', fmt(k.revenue))}${kpi('Возвратов', k.returned)}${kpi('Оплачено, ждут выдачи', k.paid_waiting)}</div>
+      ${k.pending ? msgBox('info', '', `Сейчас ожидают оплаты: ${k.pending}`) : ''}
+      ${s.byProduct.length ? `<div class="card" style="margin-top:12px"><h2 class="h3">Продажи по товарам</h2><dl class="kv">${s.byProduct.map(x => `<dt>${esc(x.product_name)}</dt><dd>${x.issued} шт. · ${fmt(x.revenue)} ₸</dd>`).join('')}</dl></div>` : ''}
+      ${s.stock ? `<div class="card"><h2 class="h3">Остатки на точке</h2>
+        ${s.stock.map(x => `<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line)"><div style="min-width:0"><div style="font-weight:500">${esc(x.productName)}</div><div class="muted sm">на складе ${x.on_hand}${x.reserved ? `, в брони ${x.reserved}` : ''}</div></div>
+          <div style="text-align:right;flex:none"><b style="font-size:20px;color:${x.available === 0 ? 'var(--danger)' : x.low ? '#8A5D00' : 'inherit'}">${x.available}</b><div class="muted sm">доступно</div></div></div>`).join('')}
+        ${s.stock.some(x => x.low) ? `<p class="muted sm" style="margin-top:8px">Остаток ${s.lowStockThreshold} шт. и меньше выделен цветом — сообщите администратору.</p>` : ''}</div>` : ''}
+      <div class="section-title" style="margin-top:18px"><h2 class="h3">Реестр продаж</h2><a class="btn sm sec" href="/api/seller/sales/export.xlsx?${qs}">${ic('download', 16)}Excel</a></div>
+      <div class="input-row" style="margin-bottom:10px"><input class="input" id="rsq" data-in="sRq" placeholder="ИИН, № ТУ, серийный №" value="${esc(this.rQ)}" style="height:44px;font-size:15px"><button class="btn sm" data-act="sRsearch" style="height:44px">${ic('search', 18)}</button></div>
+      ${sales.rows.length ? `<div class="olist">${sales.rows.map(o => `<button class="orow" data-act="sOpen" data-n="${o.num}"><div class="main"><b>№ ${o.num} · ${esc(o.serial_number || '')}</b><div class="sub">${fmtDT(o.issued_at)} · ${esc(o.product_name)}</div><div class="sub">${esc(o.owner_name)}${o.recipient === 'proxy' ? ' (по доверенности)' : ''}</div></div>${pill(o.status)}</button>`).join('')}</div>
+        ${pages > 1 ? `<div class="pager"><span class="muted sm">Стр. ${this.rPage + 1} из ${pages}</span><button class="btn sm line" data-act="sRpage" data-d="-1" ${this.rPage ? '' : 'disabled'}>${ic('back', 16)}</button><button class="btn sm line" data-act="sRpage" data-d="1" ${this.rPage + 1 < pages ? '' : 'disabled'}>${ic('chev', 16)}</button></div>` : ''}`
+        : '<div class="card muted sm">За выбранный период выдач нет.</div>'}`, 'Отчеты'));
+  },
+
   async findReturn() {
     this.ret = null; this.retErr = null;
     if (!this.retQ.trim()) { toast('Введите серийный номер'); return; }
@@ -201,12 +236,16 @@ Object.assign(Staff.ACT, {
     }));
   },
   sRetFind() { return Seller.findReturn(); },
+  sPeriod(t) { Seller.period(Number(t.dataset.d)); return Seller.show(); },
+  sRpage(t) { Seller.rPage = Math.max(0, Seller.rPage + Number(t.dataset.d)); return Seller.show(); },
+  sRsearch() { Seller.rQ = $('#rsq').value.trim(); Seller.rPage = 0; return Seller.show(); },
   async sReturn(btn) {
     const reason = $('#rr').value, comment = $('#rc').value.trim();
+    const returnToStock = !!$('#rstock')?.checked && reason !== 'Неисправность счетчика';
     await busy(btn, () => guard(async () => {
       try {
-        const r = await POST(`/api/seller/orders/${Seller.ret.num}/return`, { reason, comment, confirmed: $('#rchk').checked });
-        toast(`Возврат оформлен, ТУ ${r.tuNumber} разблокировано`);
+        const r = await POST(`/api/seller/orders/${Seller.ret.num}/return`, { reason, comment, returnToStock, confirmed: $('#rchk').checked });
+        toast(`Возврат оформлен, ТУ ${r.tuNumber} разблокировано${r.returnedToStock ? ', счетчик возвращен в остаток' : ''}`);
         Seller.ret = null; Seller.retQ = '';
         Seller.renderReturn();
       } catch (e) { $('#rerr').innerHTML = `<div style="margin-bottom:8px">${msgBox('err', '', e.message)}</div>`; }
@@ -216,15 +255,20 @@ Object.assign(Staff.ACT, {
 Object.assign(Staff.IN, {
   sq(t) { Seller.q = t.value; },
   sRetQ(t) { Seller.retQ = t.value; },
+  sRq(t) { Seller.rQ = t.value; },
   sF(t) { Seller.f[t.dataset.k] = t.value; Seller.refreshIssue(); },
   sIin(t) { const d = digits(t.value).slice(0, 12); Seller.f.proxyIin = d; t.value = maskIIN(d); Seller.refreshIssue(); },
 });
 Object.assign(Staff.CH, {
   sChk(t) { Seller.f.checklist[t.dataset.k] = t.checked; Seller.refreshIssue(); },
   sRetChk(t) { $('#rbtn').disabled = !t.checked; },
+  sRr(t) { const bad = t.value === 'Неисправность счетчика'; const w = $('#rstockWrap'); if (w && Seller.ret?.stockTracked) { w.classList.toggle('hide', bad); if (bad) $('#rstock').checked = false; } },
+  sFrom(t) { Seller.rFrom = t.value || Seller.rFrom; if (Seller.rFrom > Seller.rTo) Seller.rTo = Seller.rFrom; Seller.rPage = 0; return Seller.show(); },
+  sTo(t) { Seller.rTo = t.value || Seller.rTo; if (Seller.rTo < Seller.rFrom) Seller.rFrom = Seller.rTo; Seller.rPage = 0; return Seller.show(); },
 });
 document.addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
   if (e.target.id === 'sq') Staff.ACT.sSearch();
   if (e.target.id === 'rq') Staff.ACT.sRetFind();
+  if (e.target.id === 'rsq') Staff.ACT.sRsearch();
 });

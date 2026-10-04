@@ -1,17 +1,18 @@
 /* Кабинет администратора */
 'use strict';
-const ATABS = [['reports', 'Отчеты', 'chart'], ['points', 'Точки продаж', 'store'], ['sellers', 'Продавцы', 'users'], ['products', 'Товары', 'box'], ['tu', 'База ТУ', 'db'], ['audit', 'Журнал', 'doc'], ['profile', 'Профиль', 'key']];
+const ATABS = [['reports', 'Отчеты', 'chart'], ['sales', 'Реестр продаж', 'doc'], ['stock', 'Остатки', 'box'], ['points', 'Точки продаж', 'store'], ['sellers', 'Продавцы', 'users'], ['products', 'Товары', 'box'], ['tu', 'База ТУ', 'db'], ['audit', 'Журнал', 'doc'], ['settings', 'Настройки', 'key'], ['profile', 'Профиль', 'user']];
 const ACTIONS = {
   login: 'Вход', login_locked: 'Блокировка входа', change_credentials: 'Смена логина/пароля', order_paid: 'Подтверждена оплата', order_issued: 'Выдан счетчик',
   order_returned: 'Возврат', point_create: 'Создана точка', point_update: 'Изменена точка', seller_create: 'Создан продавец', seller_update: 'Изменен продавец',
   seller_block: 'Продавец заблокирован', seller_unblock: 'Продавец разблокирован', seller_reset_password: 'Сброс пароля продавца', product_create: 'Создан товар',
-  product_update: 'Изменен товар', product_photo_add: 'Добавлено фото', product_photo_delete: 'Удалено фото', tu_import: 'Загрузка базы ТУ', report_export: 'Выгрузка отчета',
+  product_update: 'Изменен товар', settings_update: 'Изменены настройки', stock_receipt: 'Приход товара', stock_correction: 'Корректировка остатка', sales_export: 'Выгрузка реестра продаж', product_photo_add: 'Добавлено фото', product_photo_delete: 'Удалено фото', tu_import: 'Загрузка базы ТУ', report_export: 'Выгрузка отчета',
 };
 const today = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Almaty' });
 const daysAgo = n => new Date(Date.now() - n * 86400000).toLocaleDateString('sv-SE', { timeZone: 'Asia/Almaty' });
 
 const Admin = {
   tab: 'reports', from: daysAgo(29), to: today(), tuQ: '', tuPage: 0, importRes: null,
+  sf: { from: daysAgo(29), to: today(), pointId: '', status: 'all', q: '', page: 0 }, stockData: null, movesPoint: '',
   points: [], products: [], sellers: [], regions: null,
   async start() { this.tab = 'reports'; await this.show(); },
 
@@ -23,7 +24,7 @@ const Admin = {
   },
   async show() {
     await guard(async () => {
-      const v = { reports: this.vReports, points: this.vPoints, sellers: this.vSellers, products: this.vProducts, tu: this.vTU, audit: this.vAudit, profile: this.vProfile }[this.tab];
+      const v = { reports: this.vReports, sales: this.vSales, stock: this.vStock, settings: this.vSettings, points: this.vPoints, sellers: this.vSellers, products: this.vProducts, tu: this.vTU, audit: this.vAudit, profile: this.vProfile }[this.tab];
       render(await v.call(this));
     });
   },
@@ -51,6 +52,86 @@ const Admin = {
       <div class="table-wrap"><table><thead><tr><th>№ заказа</th><th>Дата</th><th>Номер ТУ</th><th>Товар</th><th>Точка</th><th>Серийный №</th><th>Статус</th></tr></thead><tbody>
         ${r.recent.map(o => `<tr><td>${o.num}</td><td style="white-space:nowrap">${fmtDT(o.created_at)}</td><td style="white-space:nowrap">${esc(o.tu_number)}</td><td>${esc(o.product_name)}</td><td>${esc(o.point_region)}</td><td style="white-space:nowrap">${esc(o.serial_number || '—')}</td><td>${pill(o.status)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">Нет заказов</td></tr>'}
       </tbody></table></div>`);
+  },
+
+  /* ----- Реестр продаж ----- */
+  async vSales() {
+    const f = this.sf;
+    const qs = `from=${f.from}&to=${f.to}&pointId=${f.pointId}&status=${f.status}&q=${encodeURIComponent(f.q)}`;
+    const [r, points] = await Promise.all([GET(`/api/admin/sales?${qs}&page=${f.page}`), GET('/api/admin/points')]);
+    const t = r.totals, pages = Math.ceil(t.count / r.pageSize);
+    return this.shell('Реестр продаж', `<a class="btn sm sec" href="/api/admin/sales/export.xlsx?${qs}">${ic('download', 18)}Выгрузить в Excel</a>`, `
+      <div class="toolbar">
+        <div class="date-range"><input type="date" data-ch="aSf" data-k="from" value="${f.from}" max="${today()}" aria-label="С"><span class="muted">—</span><input type="date" data-ch="aSf" data-k="to" value="${f.to}" max="${today()}" aria-label="По"></div>
+        <select class="input" data-ch="aSf" data-k="pointId" style="height:44px;width:auto;max-width:320px;font-size:14px"><option value="">Все точки</option>${points.map(p => `<option value="${p.id}" ${String(p.id) === String(f.pointId) ? 'selected' : ''}>${esc(p.region)}, ${esc(p.address)}</option>`).join('')}</select>
+        <div class="chipset">${[['all', 'Все'], ['issued', 'Выданы'], ['returned', 'Возвраты']].map(([k, l]) => `<button class="${f.status === k ? 'on' : ''}" data-act="aSfStatus" data-v="${k}">${l}</button>`).join('')}</div>
+      </div>
+      <div class="toolbar"><label class="search">${ic('search', 18)}<input id="sfq" placeholder="ИИН, № ТУ, серийный №, ФИО" value="${esc(f.q)}" aria-label="Поиск"></label><button class="btn sm" data-act="aSfSearch">Найти</button></div>
+      <div class="kpis"><div class="kpi"><span>Выдано, шт.</span><b>${t.issued}</b></div><div class="kpi"><span>Сумма выданных, ₸</span><b>${fmt(t.revenue)}</b></div><div class="kpi"><span>Возвратов</span><b>${t.returned}</b></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Дата выдачи</th><th>№ заказа</th><th>Товар</th><th>Серийный №</th><th>Владелец ТУ</th><th>Номер ТУ</th><th>Точка</th><th>Продавец</th><th>Получатель</th><th>Статус</th></tr></thead><tbody>
+        ${r.rows.map(o => `<tr><td style="white-space:nowrap">${fmtDT(o.issued_at)}</td><td>${o.num}</td><td>${esc(o.product_name)}</td><td style="white-space:nowrap">${esc(o.serial_number || '')}</td>
+          <td>${esc(o.owner_name)}<div class="muted sm">${maskIIN(o.iin)}</div></td><td style="white-space:nowrap">${esc(o.tu_number)}</td><td>${esc(o.point_region)}<div class="muted sm">${esc(o.point_address)}</div></td>
+          <td>${esc(o.seller_name || '')}</td><td class="sm">${o.recipient === 'proxy' ? `Представитель<div class="muted">дов. № ${esc(o.proxy_number || '')}</div>` : 'Владелец'}</td>
+          <td>${pill(o.status)}${o.status === 'returned' ? `<div class="muted sm">${fmtDate(o.returned_at)}${o.return_to_stock ? ', в остаток' : ''}</div>` : ''}</td></tr>`).join('') || '<tr><td colspan="10" class="muted">За выбранный период выдач нет</td></tr>'}
+      </tbody></table>
+      ${pages > 1 ? `<div class="pager"><span class="muted sm">${f.page * r.pageSize + 1}–${Math.min(t.count, (f.page + 1) * r.pageSize)} из ${t.count}</span><button class="btn sm line" data-act="aSfPage" data-d="-1" ${f.page ? '' : 'disabled'}>${ic('back', 16)}</button><button class="btn sm line" data-act="aSfPage" data-d="1" ${f.page + 1 < pages ? '' : 'disabled'}>${ic('chev', 16)}</button></div>` : ''}</div>`);
+  },
+
+  /* ----- Остатки ----- */
+  async vStock() {
+    const [d, moves] = await Promise.all([GET('/api/admin/stock'), GET(`/api/admin/stock/moves${this.movesPoint ? `?pointId=${this.movesPoint}` : ''}`)]);
+    this.stockData = d;
+    const cell = (pt, pr) => d.cells.find(c => c.point_id === pt && c.product_id === pr) || { on_hand: 0, reserved: 0, available: 0 };
+    const thr = d.settings.lowStockThreshold;
+    const REASONS = { receipt: 'Приход', correction: 'Корректировка', issue: 'Выдача', return: 'Возврат' };
+    return this.shell('Остатки по точкам', `<button class="btn sm" data-act="aStockOp" data-op="receipt">${ic('plus', 18)}Приход</button><button class="btn sm line" data-act="aStockOp" data-op="correction">${ic('edit', 18)}Корректировка</button>`, `
+      ${d.settings.stockEnabled ? '' : `<div style="margin-bottom:14px">${msgBox('warn', 'Учет остатков выключен', 'Покупатели могут заказывать без ограничения количества. Внесите приход по всем точкам, затем включите учет в разделе «Настройки».')}</div>`}
+      <p class="muted sm" style="margin-bottom:10px">В каждой ячейке: <b>доступно к заказу</b> / на складе (в брони). Красным — товар закончился, желтым — осталось ${thr} шт. и меньше.</p>
+      <div class="table-wrap"><table><thead><tr><th>Точка продаж</th>${d.products.map(p => `<th class="num" style="white-space:normal;min-width:110px">${esc(p.name)}</th>`).join('')}</tr></thead><tbody>
+        ${d.points.map(pt => `<tr><td><b style="font-weight:600">${esc(pt.region)}</b><div class="muted sm">${esc(pt.address)}</div></td>${d.products.map(pr => { const c = cell(pt.id, pr.id); const col = c.available === 0 ? 'var(--danger)' : c.available <= thr ? '#8A5D00' : 'var(--ink)'; return `<td class="num"><b style="font-size:17px;color:${col}">${c.available}</b><div class="muted sm">${c.on_hand}${c.reserved ? ` (${c.reserved})` : ''}</div></td>`; }).join('')}</tr>`).join('') || `<tr><td colspan="${d.products.length + 1}" class="muted">Нет действующих точек продаж</td></tr>`}
+      </tbody></table></div>
+      <div class="section-title" style="margin-top:22px"><h2 class="h3">Движение товара</h2>
+        <select class="input" data-ch="aMovesPoint" style="height:40px;width:auto;max-width:320px;font-size:14px"><option value="">Все точки</option>${d.points.map(p => `<option value="${p.id}" ${String(p.id) === String(this.movesPoint) ? 'selected' : ''}>${esc(p.region)}, ${esc(p.address)}</option>`).join('')}</select></div>
+      <div class="table-wrap"><table><thead><tr><th>Дата</th><th>Точка</th><th>Товар</th><th>Операция</th><th class="num">Изменение</th><th class="num">Остаток</th><th>Заказ</th><th>Кто</th><th>Комментарий</th></tr></thead><tbody>
+        ${moves.map(m => `<tr><td style="white-space:nowrap">${fmtDT(m.created_at)}</td><td class="sm">${esc(m.point_region)}<div class="muted">${esc(m.point_address)}</div></td><td>${esc(m.product_name)}</td><td>${REASONS[m.reason]}</td>
+          <td class="num" style="color:${m.delta > 0 ? 'var(--ok)' : 'var(--danger)'}">${m.delta > 0 ? '+' : ''}${m.delta}</td><td class="num">${m.balance}</td><td>${m.order_num || ''}</td><td class="sm">${esc(m.user_name || '')}</td><td class="sm">${esc(m.comment || '')}</td></tr>`).join('') || '<tr><td colspan="9" class="muted">Движений пока нет</td></tr>'}
+      </tbody></table></div>`);
+  },
+  stockModal(op) {
+    const d = this.stockData;
+    if (!d.points.length || !d.products.length) return toast('Сначала добавьте точки продаж и товары');
+    const receipt = op === 'receipt';
+    openModal(`<div class="sheet-head"><h2>${receipt ? 'Приход товара на точку' : 'Корректировка остатка'}</h2><button class="iconbtn" data-act="closeModal" aria-label="Закрыть">${ic('x', 22)}</button></div>
+      <div class="field"><label for="stp">Точка продаж</label><select class="input" id="stp" data-ch="aStockSel"><option value="">Выберите точку</option>${d.points.map(p => `<option value="${p.id}">${esc(p.region)}, ${esc(p.address)}</option>`).join('')}</select></div>
+      <div class="field"><label for="stpr">Товар</label><select class="input" id="stpr" data-ch="aStockSel"><option value="">Выберите товар</option>${d.products.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></div>
+      <div id="stCur" class="muted sm" style="margin:-6px 0 12px"></div>
+      <div class="field"><label for="stq">${receipt ? 'Количество поступивших, шт.' : 'Фактический остаток на складе точки, шт.'}</label><input class="input" id="stq" inputmode="numeric" placeholder="${receipt ? 'Например, 50' : 'Сколько счетчиков реально лежит на точке'}"></div>
+      <div class="field"><label for="stc">${receipt ? 'Комментарий (номер накладной и т. п.)' : 'Причина корректировки'}</label><input class="input" id="stc" maxlength="300" placeholder="${receipt ? 'Необязательно' : 'Обязательно: инвентаризация, брак и т. п.'}"></div>
+      ${receipt ? '' : msgBox('info', '', 'Укажите, сколько счетчиков физически находится на точке, включая отложенные под оплаченные заказы. Система сама рассчитает разницу.') + '<div style="height:12px"></div>'}
+      <div id="merr"></div><button class="btn block" data-act="aStockSave" data-op="${op}">Сохранить</button>`);
+  },
+
+  /* ----- Настройки ----- */
+  async vSettings() {
+    const [s, qr] = await Promise.all([GET('/api/admin/settings'), GET('/api/admin/site-qr')]);
+    return this.shell('Настройки', '', `<div style="max-width:720px">
+      <div class="card" style="margin-bottom:12px"><h2 class="h3">Правила продажи</h2>
+        <label class="switch" style="padding:8px 0"><input type="checkbox" id="setLegal" ${s.allowLegalEntities ? 'checked' : ''}><span><b style="font-weight:600">Разрешить продажу юридическим лицам</b><div class="muted sm">Покупка по ТУ, выданным на БИН (ТОО, АО, ИП). Если выключено, покупатель с ТУ юрлица увидит сообщение «Покупка по ТУ, выданным юридическим лицам, недоступна».</div></span></label>
+      </div>
+      <div class="card" style="margin-bottom:12px"><h2 class="h3">Учет остатков</h2>
+        <label class="switch" style="padding:8px 0"><input type="checkbox" id="setStock" ${s.stockEnabled ? 'checked' : ''}><span><b style="font-weight:600">Учитывать остатки по точкам</b><div class="muted sm">Покупатель видит только точки, где товар есть в наличии; заказ бронирует 1 шт., выдача списывает. Перед включением внесите приход по всем точкам в разделе «Остатки».</div></span></label>
+        <div class="field" style="margin:10px 0 0;max-width:260px"><label for="setLow">Предупреждать, когда осталось, шт.</label><input class="input" id="setLow" inputmode="numeric" value="${s.lowStockThreshold}"></div>
+      </div>
+      <div id="setErr"></div>
+      <button class="btn" data-act="aSettingsSave">Сохранить настройки</button>
+      <div class="card" style="margin-top:20px"><h2 class="h3">QR-код сайта для точек продаж</h2>
+        <div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">
+          <div class="qrbox"><img src="/api/admin/site-qr.svg" width="160" height="160" alt="QR-код сайта"></div>
+          <div style="flex:1;min-width:220px"><p style="margin-bottom:6px">Ведет на <b>${esc(qr.url)}</b></p>
+            <p class="muted sm" style="margin-bottom:12px">Постоянный код: адрес зашит прямо в изображение, без сервисов-посредников, переадресаций и рекламы. Не истекает. Меняется, только если сменится адрес сайта.</p>
+            <div class="btn-row"><a class="btn sm" href="/api/admin/site-qr.pdf">${ic('download', 16)}Плакат A4 (PDF)</a><a class="btn sm sec" href="/api/admin/site-qr.png">PNG</a><a class="btn sm sec" href="/api/admin/site-qr.svg">SVG</a></div></div>
+        </div></div>
+    </div>`);
   },
 
   /* ----- Точки ----- */
@@ -233,6 +314,32 @@ Object.assign(Staff.ACT, {
     }));
   },
   async aPhotoRm(t) { await guard(async () => { await DEL(`/api/admin/products/${t.dataset.id}/photos/${t.dataset.pos}`); await Admin.refreshSlots(t.dataset.id); }); },
+  aSfStatus(t) { Admin.sf.status = t.dataset.v; Admin.sf.page = 0; return Admin.show(); },
+  aSfSearch() { Admin.sf.q = $('#sfq').value.trim(); Admin.sf.page = 0; return Admin.show(); },
+  aSfPage(t) { Admin.sf.page = Math.max(0, Admin.sf.page + Number(t.dataset.d)); return Admin.show(); },
+  aStockOp(t) { Admin.stockModal(t.dataset.op); },
+  async aStockSave(btn) {
+    const op = btn.dataset.op, pointId = Number($('#stp').value), productId = Number($('#stpr').value), n = Number(digits($('#stq').value)), comment = $('#stc').value.trim();
+    if (!pointId || !productId) { $('#merr').innerHTML = Admin.err('Выберите точку и товар'); return; }
+    if ($('#stq').value.trim() === '' || (op === 'receipt' && !n)) { $('#merr').innerHTML = Admin.err('Укажите количество'); return; }
+    if (op === 'correction' && !comment) { $('#merr').innerHTML = Admin.err('Укажите причину корректировки'); return; }
+    await busy(btn, () => guard(async () => {
+      let r;
+      try { r = await POST(`/api/admin/stock/${op}`, op === 'receipt' ? { pointId, productId, qty: n, comment } : { pointId, productId, actual: n, comment }); }
+      catch (e) { $('#merr').innerHTML = Admin.err(e.message); return; }
+      closeModal(); toast(`Сохранено. Остаток на складе точки: ${r.balance} шт.`); Admin.show();
+    }));
+  },
+  async aSettingsSave(btn) {
+    const body = { allowLegalEntities: $('#setLegal').checked, stockEnabled: $('#setStock').checked, lowStockThreshold: Number(digits($('#setLow').value)) || 0 };
+    if (body.stockEnabled && Admin.stockData === null) Admin.stockData = await GET('/api/admin/stock');
+    const total = Admin.stockData ? Admin.stockData.cells.reduce((a, c) => a + c.on_hand, 0) : 1;
+    if (body.stockEnabled && !total && !confirm('Остатки не внесены ни по одной точке. Если включить учет, покупатели не смогут оформить заказ. Включить?')) return;
+    await busy(btn, () => guard(async () => {
+      try { await PUT('/api/admin/settings', body); } catch (e) { $('#setErr').innerHTML = Admin.err(e.message); return; }
+      toast('Настройки сохранены'); Admin.show();
+    }));
+  },
   aTuPage(t) { Admin.tuPage = Math.max(0, Admin.tuPage + Number(t.dataset.d)); return Admin.show(); },
 });
 let tuTimer;
@@ -240,6 +347,14 @@ Object.assign(Staff.IN, {
   aTuQ(t) { clearTimeout(tuTimer); tuTimer = setTimeout(async () => { Admin.tuQ = t.value.trim(); Admin.tuPage = 0; await Admin.show(); const n = $('#tuq'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 400); },
 });
 Object.assign(Staff.CH, {
+  aSf(t) { Admin.sf[t.dataset.k] = t.value; if (Admin.sf.from > Admin.sf.to) Admin.sf.to = Admin.sf.from; Admin.sf.page = 0; return Admin.show(); },
+  aMovesPoint(t) { Admin.movesPoint = t.value; return Admin.show(); },
+  aStockSel() {
+    const pt = Number($('#stp').value), pr = Number($('#stpr').value), el = $('#stCur');
+    if (!pt || !pr) { el.textContent = ''; return; }
+    const c = Admin.stockData.cells.find(x => x.point_id === pt && x.product_id === pr) || { on_hand: 0, reserved: 0, available: 0 };
+    el.textContent = `Сейчас: на складе ${c.on_hand}, в брони ${c.reserved}, доступно ${c.available}`;
+  },
   aFrom(t) { Admin.from = t.value || daysAgo(29); if (Admin.from > Admin.to) Admin.to = Admin.from; return Admin.show(); },
   aTo(t) { Admin.to = t.value || today(); if (Admin.to < Admin.from) Admin.from = Admin.to; return Admin.show(); },
   async aPhoto(t) {
@@ -268,3 +383,4 @@ Object.assign(Staff.CH, {
     });
   },
 });
+document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'sfq') Staff.ACT.aSfSearch(); });

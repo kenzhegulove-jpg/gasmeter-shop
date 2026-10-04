@@ -6,22 +6,54 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const fmt = n => String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u00A0');
 const digits = s => String(s ?? '').replace(/\D/g, '');
 const maskIIN = d => (d.length > 6 ? d.slice(0, 6) + ' ' + d.slice(6) : d);
-const fmtDT = t => (t ? new Date(t).toLocaleString('ru-RU', { timeZone: 'Asia/Almaty', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—');
-const fmtDate = t => (t ? new Date(t).toLocaleDateString('ru-RU', { timeZone: 'Asia/Almaty' }) : '—');
-const STATUS = { pending: 'Ожидает оплаты', paid: 'Оплачен', issued: 'Выдан', returned: 'Возврат', cancelled: 'Отменён' };
-const pill = s => `<span class="pill ${s}">${STATUS[s] || esc(s)}</span>`;
+/* ---------- Языки интерфейса (RU / KK) ----------
+ * T('ключ', {параметры}) — текст на текущем языке. Словарь покупателя — в /js/i18n.js.
+ * Кабинеты сотрудников i18n.js не подключают и всегда работают на русском. */
+let LANG = 'ru';
+const I18N = {
+  ru: {
+    st_pending: 'Ожидает оплаты', st_paid: 'Оплачен', st_issued: 'Выдан', st_returned: 'Возврат', st_cancelled: 'Отменён',
+    err_net: 'Нет связи с сервером. Проверьте интернет и повторите.', err_server: 'Ошибка сервера', error: 'Ошибка', wait: 'Подождите…',
+    img_meter: 'Изображение счётчика', img_box: 'счётчик газа', img_lcd: 'электронный отсчётный механизм', img_drum: 'роликовый отсчётный механизм, м³',
+  },
+  kk: {},
+};
+function T(key, p) {
+  let s = I18N[LANG]?.[key] ?? I18N.ru[key] ?? key;
+  if (p) s = s.replace(/\{(\w+)\}/g, (_, n) => (p[n] ?? ''));
+  return s;
+}
+const LOCALE = () => (LANG === 'kk' ? 'kk-KZ' : 'ru-RU');
+/** Текст ошибки сервера на текущем языке: по коду ошибки, иначе — как прислал сервер */
+function errText(data, status) {
+  if (LANG !== 'ru') {
+    if (data?.code && I18N[LANG]['err_' + data.code]) return T('err_' + data.code, { ...data, min: fmtMin(data.retryMin ?? data.minutesLeft) });
+    if (status >= 500) return T('err_500');
+  }
+  return data?.error || T('err_server');
+}
+/** 135 → «2 ч 15 мин» / «2 сағ 15 мин» */
+function fmtMin(m) {
+  m = Math.max(1, Math.round(Number(m) || 0));
+  const h = Math.floor(m / 60), r = m % 60, hh = LANG === 'kk' ? 'сағ' : 'ч';
+  return h ? `${h} ${hh}${r ? ` ${r} мин` : ''}` : `${r} мин`;
+}
+
+const fmtDT = t => (t ? new Date(t).toLocaleString(LOCALE(), { timeZone: 'Asia/Almaty', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—');
+const fmtDate = t => (t ? new Date(t).toLocaleDateString(LOCALE(), { timeZone: 'Asia/Almaty' }) : '—');
+const pill = s => `<span class="pill ${esc(s)}">${I18N.ru['st_' + s] ? T('st_' + s) : esc(s)}</span>`;
 
 class ApiError extends Error { constructor(msg, status, data) { super(msg); this.status = status; this.data = data || {}; this.code = this.data.code; } }
 
 async function api(method, url, body) {
-  const opt = { method, headers: { 'X-Requested-With': 'fetch' }, credentials: 'same-origin' };
+  const opt = { method, headers: { 'X-Requested-With': 'fetch', 'X-Lang': LANG }, credentials: 'same-origin' };
   if (body instanceof FormData) opt.body = body;
   else if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   let res;
-  try { res = await fetch(url, opt); } catch { throw new ApiError('Нет связи с сервером. Проверьте интернет и повторите.', 0); }
+  try { res = await fetch(url, opt); } catch { throw new ApiError(T('err_net'), 0); }
   const isJson = (res.headers.get('content-type') || '').includes('json');
   const data = isJson ? await res.json() : null;
-  if (!res.ok) throw new ApiError(data?.error || 'Ошибка сервера', res.status, data);
+  if (!res.ok) throw new ApiError(errText(data, res.status), res.status, data);
   return data;
 }
 const GET = url => api('GET', url);
@@ -107,12 +139,12 @@ function bindEvents(ACT, IN = {}, CH = {}) {
   document.addEventListener('input', e => { const f = IN[e.target.dataset.in]; if (f) f(e.target, e); });
   document.addEventListener('change', e => { const f = CH[e.target.dataset.ch]; if (f) Promise.resolve(f(e.target, e)).catch(handleError); });
 }
-function handleError(e) { console.error(e); toast(e.message || 'Ошибка'); }
+function handleError(e) { console.error(e); toast(e.message || T('error')); }
 
 /** Блокирует кнопку на время запроса */
 async function busy(btn, fn) {
   if (!btn) return fn();
-  const html = btn.innerHTML; btn.disabled = true; btn.innerHTML = 'Подождите…';
+  const html = btn.innerHTML; btn.disabled = true; btn.innerHTML = T('wait');
   try { return await fn(); } finally { if (btn.isConnected) { btn.disabled = false; btn.innerHTML = html; } }
 }
 
@@ -165,7 +197,7 @@ function meterSVG(kind, view) {
     <linearGradient id="${id}s" x1="0" x2="1"><stop offset="0" stop-color="#A9B3BA"/><stop offset="1" stop-color="#87929A"/></linearGradient>
     <linearGradient id="${id}p" x1="0" x2="1"><stop offset="0" stop-color="#8A949B"/><stop offset=".5" stop-color="#D3D9DD"/><stop offset="1" stop-color="#8A949B"/></linearGradient>
   </defs>`;
-  const open = `<svg class="ph" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Изображение счётчика">${defs}<rect width="200" height="200" fill="#F4F6F7"/>`;
+  const open = `<svg class="ph" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${T('img_meter')}">${defs}<rect width="200" height="200" fill="#F4F6F7"/>`;
   const lcd = kind === 'lcd';
   if (view === 3) { // packaging
     return open + `<ellipse cx="100" cy="176" rx="70" ry="6" fill="#17212B" opacity=".08"/>
@@ -176,13 +208,13 @@ function meterSVG(kind, view) {
       <path d="M100 74l60-14v26l-60 14z" fill="#09A39F"/>
       <rect x="54" y="110" width="32" height="38" rx="5" fill="#E6EAED"/><rect x="58" y="116" width="24" height="10" rx="2" fill="#17212B"/>
       <text x="128" y="132" font-family="Onest,Arial" font-size="20" font-weight="800" fill="#17212B" text-anchor="middle">${kind==='compact'?'G2,5':'G4'}</text>
-      <text x="128" y="148" font-family="Onest,Arial" font-size="8" fill="#67737D" text-anchor="middle">счётчик газа</text></svg>`;
+      <text x="128" y="148" font-family="Onest,Arial" font-size="8" fill="#67737D" text-anchor="middle">${T('img_box')}</text></svg>`;
   }
   if (view === 2) { // close-up of counter
     const face = lcd
       ? `<rect x="22" y="58" width="156" height="84" rx="12" fill="#9ED8C6"/><text x="100" y="114" font-family="Courier New,monospace" font-size="34" font-weight="700" fill="#1F3B33" text-anchor="middle">0124.368</text><text x="36" y="76" font-family="Arial" font-size="10" fill="#1F3B33">м³</text><text x="164" y="76" font-family="Arial" font-size="10" fill="#1F3B33" text-anchor="end">GSM ▮▮▮</text>`
       : `<rect x="18" y="62" width="164" height="76" rx="12" fill="#1C2830"/>${[0,1,2,3,4,5,6,7].map(i=>`<rect x="${28+i*19.5}" y="78" width="16" height="44" rx="3" fill="${i>4?'#E7584A':'#F4F6F7'}"/><text x="${36+i*19.5}" y="109" font-family="Courier New,monospace" font-size="22" font-weight="700" fill="${i>4?'#fff':'#17212B'}" text-anchor="middle">${'00124368'[i]}</text>`).join('')}`;
-    return open + `<rect x="8" y="30" width="184" height="140" rx="18" fill="url(#${id}b)"/>${face}<text x="100" y="160" font-family="Onest,Arial" font-size="10" fill="#67737D" text-anchor="middle">${lcd?'электронный отсчётный механизм':'роликовый отсчётный механизм, м³'}</text></svg>`;
+    return open + `<rect x="8" y="30" width="184" height="140" rx="18" fill="url(#${id}b)"/>${face}<text x="100" y="160" font-family="Onest,Arial" font-size="10" fill="#67737D" text-anchor="middle">${lcd?T('img_lcd'):T('img_drum')}</text></svg>`;
   }
   const compact = kind === 'compact';
   let bx = compact ? 54 : 40, bw = compact ? 92 : 120, by = compact ? 54 : 42, bh = compact ? 118 : 136;

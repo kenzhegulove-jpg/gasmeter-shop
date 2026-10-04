@@ -42,6 +42,13 @@ p{margin:0}
 .staff-link{display:flex;align-items:center;gap:6px;border:0;background:none;cursor:pointer;color:var(--muted);font-size:13px;font-weight:500;padding:8px;border-radius:10px;white-space:nowrap}
 .staff-link:hover{background:var(--bg);color:var(--ink)}
 @media(max-width:620px){.staff-link span{display:none}.logo-text{display:none}}
+/* Переключатель языка ҚАЗ | РУС */
+.lang-sw{display:flex;flex-shrink:0;background:var(--bg);border-radius:10px;padding:3px;gap:2px}
+.lang-sw button{border:0;background:none;font:inherit;font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--muted);padding:5px 8px;border-radius:7px;cursor:pointer;min-width:38px}
+.lang-sw button.on{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(23,33,43,.12)}
+.lang-sw button:focus-visible{outline:2px solid var(--accent,#0ABAB5);outline-offset:1px}
+.topbar-in .headtitle{flex:1;min-width:0}
+@media(max-width:420px){.step-n{display:none}}
 .headtitle{font-weight:700;font-size:17px;flex:1}
 
 /* layout */

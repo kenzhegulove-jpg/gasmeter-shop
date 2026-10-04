@@ -143,7 +143,7 @@ r.get('/orders/:num', async (req, res) => { res.set('Cache-Control', 'no-store')
 r.get('/orders/:num/qr.svg', async (req, res) => { res.set('Content-Type', 'image/svg+xml').set('Cache-Control', 'no-store').send(await orderQrSvg(await orderByToken(req))); });
 r.get('/orders/:num/pdf', async (req, res) => {
   const o = await orderByToken(req);
-  res.set('Content-Type', 'application/pdf').set('Content-Disposition', `attachment; filename="order-${o.num}.pdf"`).send(await orderPdf(o));
+  res.set('Content-Type', 'application/pdf').set('Content-Disposition', `attachment; filename="order-${o.num}.pdf"`).send(await orderPdf(o, req.query.lang === 'kk' ? 'kk' : 'ru'));
 });
 
 module.exports = r;

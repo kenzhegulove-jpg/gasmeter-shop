@@ -40,7 +40,12 @@ function dear(fullName, legal) {
 }
 const fmtMoney = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 
-function noticeText(o) {
+/** Текст уведомления покупателю; lang: 'ru' (по умолчанию) или 'kk' */
+function noticeText(o, lang = 'ru') {
+  if (lang === 'kk') {
+    const greet = o.is_legal ? 'Құрметті сатып алушы' : `Құрметті ${shortName(o.owner_name, o.is_legal)}`;
+    return `${greet}, есепке алу аспабы халыққа арналған арнайы жеңілдікті бағамен сатып алынатынын және мына мекенжай бойынша орнатылуға тиіс екенін еске саламыз: ${o.address}. Нысан иесіне есепке алу аспабы ҚҚС-ты қоса алғанда ${fmtMoney(o.price)} теңге бағасымен сатып алынғаны туралы хабарланады.`;
+  }
   return `${dear(o.owner_name, o.is_legal)}${o.is_legal ? '' : ' ' + shortName(o.owner_name, o.is_legal)}, напоминаем, что прибор учета приобретается по специальной скидочной цене для населения и подлежит установке по адресу: ${o.address}. Владелец объекта будет уведомлен, что прибор учета приобретен по цене ${fmtMoney(o.price)} тенге с НДС.`;
 }
 

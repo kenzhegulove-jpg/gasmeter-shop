@@ -17,7 +17,10 @@ const { parseFilters, salesPage, salesWorkbook } = require('../sales');
 const { siteQrSvg, siteQrPng, siteQrPoster } = require('../site-qr');
 
 const r = express.Router();
-r.use(requireRole('admin'));
+// Финансист: только просмотр и выгрузка отчетов (GET), все остальное — только администратор
+const FINANCE_READ = [/^\/reports\//, /^\/sales(\/export\.xlsx)?$/, /^\/stock(\/moves)?$/, /^\/points$/];
+r.use((req, res, next) => (req.method === 'GET' && FINANCE_READ.some(rx => rx.test(req.path))
+  ? requireRole('admin', 'finance') : requireRole('admin'))(req, res, next));
 
 const photoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
 const tuUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024, files: 50 } });
@@ -51,43 +54,46 @@ r.put('/points/:id', async (req, res) => {
 
 /* ---------- Продавцы ---------- */
 r.get('/sellers', async (_req, res) => {
-  const { rows } = await q(`SELECT u.id, u.full_name, u.login, u.point_id, u.blocked, u.must_change_password, u.last_login_at, u.locked_until > now() AS locked,
+  const { rows } = await q(`SELECT u.id, u.role, u.full_name, u.login, u.point_id, u.blocked, u.must_change_password, u.last_login_at, u.locked_until > now() AS locked,
       p.region AS point_region, p.address AS point_address
-    FROM users u LEFT JOIN points p ON p.id=u.point_id WHERE u.role='seller' ORDER BY u.blocked, u.full_name`);
+    FROM users u LEFT JOIN points p ON p.id=u.point_id WHERE u.role IN ('seller','finance') ORDER BY u.blocked, u.role DESC, u.full_name`);
   res.json(rows);
 });
 
 async function sellerBody(b, id) {
-  const d = { fullName: str(b.fullName, 200), login: str(b.login, 64), pointId: Number(b.pointId) || 0 };
+  const d = { role: b.role === 'finance' ? 'finance' : 'seller', fullName: str(b.fullName, 200), login: str(b.login, 64), pointId: Number(b.pointId) || 0 };
   if (d.fullName.split(/\s+/).length < 2) throw bad('Укажите ФИО полностью', 'full_name');
   const le = pw.validateLogin(d.login);
   if (le) throw bad(le, 'login_format');
   const dup = await q('SELECT 1 FROM users WHERE lower(login)=lower($1) AND id <> $2', [d.login, id || 0]);
   if (dup.rowCount) throw bad('Такой логин уже занят', 'login_taken');
-  const p = await q('SELECT 1 FROM points WHERE id=$1 AND active', [d.pointId]);
-  if (!p.rowCount) throw bad('Выберите действующую точку продаж', 'point');
+  if (d.role === 'seller') {
+    const p = await q('SELECT 1 FROM points WHERE id=$1 AND active', [d.pointId]);
+    if (!p.rowCount) throw bad('Выберите действующую точку продаж', 'point');
+  } else d.pointId = null;
   return d;
 }
 r.post('/sellers', async (req, res) => {
   const d = await sellerBody(req.body || {});
   const temp = pw.generatePassword();
   const { rows } = await q(`INSERT INTO users (role, full_name, login, password_hash, point_id, must_change_password)
-    VALUES ('seller',$1,$2,$3,$4,true) RETURNING id`, [d.fullName, d.login, await pw.hashPassword(temp), d.pointId]);
-  await audit(req, 'seller_create', 'user', rows[0].id, { login: d.login, pointId: d.pointId });
+    VALUES ($5,$1,$2,$3,$4,true) RETURNING id`, [d.fullName, d.login, await pw.hashPassword(temp), d.pointId, d.role]);
+  await audit(req, 'seller_create', 'user', rows[0].id, { login: d.login, role: d.role, pointId: d.pointId });
   res.status(201).json({ id: rows[0].id, tempPassword: temp });
 });
 r.put('/sellers/:id', async (req, res) => {
   const id = Number(req.params.id);
   const d = await sellerBody(req.body || {}, id);
-  const { rowCount } = await q("UPDATE users SET full_name=$2, login=$3, point_id=$4, updated_at=now() WHERE id=$1 AND role='seller'", [id, d.fullName, d.login, d.pointId]);
-  if (!rowCount) throw new HttpError(404, 'Продавец не найден');
+  const { rowCount } = await q("UPDATE users SET role=$5, full_name=$2, login=$3, point_id=$4, updated_at=now() WHERE id=$1 AND role IN ('seller','finance')", [id, d.fullName, d.login, d.pointId, d.role]);
+  if (rowCount) await q('DELETE FROM sessions WHERE user_id=$1', [id]); // роль/точка могли измениться
+  if (!rowCount) throw new HttpError(404, 'Сотрудник не найден');
   await audit(req, 'seller_update', 'user', id, { login: d.login, pointId: d.pointId });
   res.json({ ok: true });
 });
 r.post('/sellers/:id/block', async (req, res) => {
   const id = Number(req.params.id), blocked = req.body?.blocked === true;
-  const { rowCount } = await q("UPDATE users SET blocked=$2, updated_at=now() WHERE id=$1 AND role='seller'", [id, blocked]);
-  if (!rowCount) throw new HttpError(404, 'Продавец не найден');
+  const { rowCount } = await q("UPDATE users SET blocked=$2, updated_at=now() WHERE id=$1 AND role IN ('seller','finance')", [id, blocked]);
+  if (!rowCount) throw new HttpError(404, 'Сотрудник не найден');
   if (blocked) await q('DELETE FROM sessions WHERE user_id=$1', [id]);
   await audit(req, blocked ? 'seller_block' : 'seller_unblock', 'user', id);
   res.json({ ok: true });
@@ -96,8 +102,8 @@ r.post('/sellers/:id/reset-password', async (req, res) => {
   const id = Number(req.params.id);
   const temp = pw.generatePassword();
   const { rowCount } = await q(`UPDATE users SET password_hash=$2, must_change_password=true, failed_logins=0, locked_until=NULL, updated_at=now()
-    WHERE id=$1 AND role='seller'`, [id, await pw.hashPassword(temp)]);
-  if (!rowCount) throw new HttpError(404, 'Продавец не найден');
+    WHERE id=$1 AND role IN ('seller','finance')`, [id, await pw.hashPassword(temp)]);
+  if (!rowCount) throw new HttpError(404, 'Сотрудник не найден');
   await q('DELETE FROM sessions WHERE user_id=$1', [id]);
   await audit(req, 'seller_reset_password', 'user', id);
   res.json({ tempPassword: temp });

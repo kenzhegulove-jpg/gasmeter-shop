@@ -45,7 +45,8 @@ const SELECT = `
          o.proxy_number, o.proxy_date, o.proxy_iin, o.receipt_number, o.returned_at, o.return_reason, o.return_to_stock,
          t.iin, t.owner_name, t.address, t.branch,
          pt.id AS point_id, pt.region AS point_region, pt.address AS point_address,
-         ui.full_name AS seller_name
+         ui.full_name AS seller_name,
+         EXISTS (SELECT 1 FROM receipt_photos rp WHERE rp.order_num = o.num) AS has_receipt_photo
   FROM orders o
   JOIN tu_records t ON t.tu_number = o.tu_number
   JOIN points pt ON pt.id = o.point_id
@@ -75,7 +76,7 @@ async function salesWorkbook(f, title) {
   const cols = [
     ['№', 6], ['Дата выдачи', 17], ['№ заказа', 11], ['Товар', 32], ['Серийный №', 18], ['Цена, ₸', 11],
     ['Владелец ТУ', 32], ['ИИН/БИН', 15], ['Номер ТУ', 24], ['Адрес установки', 44], ['Регион точки', 20], ['Адрес точки', 30],
-    ['Продавец', 28], ['Получатель', 14], ['Доверенность', 26], ['Чек №', 12], ['Статус', 10], ['Дата возврата', 17], ['Причина возврата', 24],
+    ['Продавец', 28], ['Получатель', 14], ['Доверенность', 26], ['Фото чека', 11], ['Статус', 10], ['Дата возврата', 17], ['Причина возврата', 24],
   ];
   const head = ws.addRow(cols.map(c => c[0]));
   head.font = { bold: true };
@@ -85,7 +86,7 @@ async function salesWorkbook(f, title) {
     ws.addRow([i + 1, local(o.issued_at), o.num, o.product_name, o.serial_number, o.price, o.owner_name, o.iin, o.tu_number, o.address,
       o.point_region, o.point_address, o.seller_name, o.recipient === 'proxy' ? 'Представитель' : 'Владелец',
       o.recipient === 'proxy' ? `№ ${o.proxy_number} от ${o.proxy_date ? new Date(o.proxy_date).toLocaleDateString('ru-RU') : ''}, ИИН ${o.proxy_iin}` : '',
-      o.receipt_number, o.status === 'returned' ? 'Возврат' : 'Выдан', local(o.returned_at), o.return_reason]);
+      o.has_receipt_photo ? 'есть' : (o.receipt_number ? `чек № ${o.receipt_number}` : 'нет'), o.status === 'returned' ? 'Возврат' : 'Выдан', local(o.returned_at), o.return_reason]);
   });
   const issued = rows.filter(o => o.status === 'issued');
   ws.addRow([]);

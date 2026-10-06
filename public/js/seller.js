@@ -47,11 +47,23 @@ const Seller = {
       this.order = await GET(`/api/seller/orders/${num}`);
       setServerNow(this.order.now);
       this.f = { recipient: 'owner', proxyNumber: '', proxyDate: '', proxyIin: '', serialNumber: '', checklist: {} };
+      this.clearReceipt();
       this.done = false;
       this.tab = 'order';
       this.renderOrder();
       window.scrollTo(0, 0);
     });
+  },
+
+  /** Выбор фото чека: pay — подтверждение оплаты, replace — замена фото */
+  receiptPicker(mode) {
+    const b = this.receipt;
+    return `<div style="margin-top:10px">
+      ${b ? `<div style="display:flex;gap:10px;align-items:center;margin-bottom:8px"><img src="${b.url}" alt="Фото чека" style="width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid var(--line)"><span class="sm">Фото готово: ${Math.round(b.blob.size / 1024)} КБ</span></div>` : ''}
+      <div class="btn-row">
+        <label class="btn sm ${b ? 'line' : ''}">${ic('camera', 16)}${b ? 'Переснять' : mode === 'pay' ? 'Сфотографировать чек' : 'Заменить фото чека'}<input type="file" accept="image/*" capture="environment" data-ch="sReceipt" class="hide"></label>
+        ${b ? `<button class="btn sm" data-act="${mode === 'pay' ? 'sPay' : 'sReceiptReplace'}">${mode === 'pay' ? 'Подтвердить оплату' : 'Сохранить новое фото'}</button>` : ''}
+      </div></div>`;
   },
 
   missing() {
@@ -84,9 +96,10 @@ const Seller = {
     const canIssue = o.status === 'paid';
     const statusBox = {
       pending: `<div class="msg warn">${ic('clock', 20)}<div><b>Ожидает оплаты на кассе</b>Заказ отменится через <span data-deadline="${o.expiresAt}">--:--</span>. Выдача возможна после оплаты.
-        <div class="input-row" style="margin-top:10px"><input class="input" id="rcpt" placeholder="Номер кассового чека" style="height:42px;font-size:15px"><button class="btn sm" data-act="sPay" style="height:42px">Подтвердить оплату</button></div></div></div>`,
-      paid: msgBox('ok', 'Оплачен', `${o.receiptNumber ? `Чек № ${o.receiptNumber}. ` : ''}Проверьте документы и заполните чек-лист выдачи.`),
-      issued: msgBox('info', 'Счетчик уже выдан', `${fmtDT(o.issuedAt)}, серийный № ${o.serialNumber}. Для возврата откройте вкладку «Возврат».`),
+        ${this.receiptPicker('pay')}</div></div>`,
+      paid: `<div class="msg ok">${ic('check', 20)}<div><b>Оплачен</b>Проверьте документы и заполните чек-лист выдачи.
+        ${o.hasReceiptPhoto ? `<div class="btn-row" style="margin-top:10px"><a class="btn sm sec" href="/api/receipts/${o.num}" target="_blank" rel="noopener">${ic('image', 16)}Фото чека</a></div>${this.receiptPicker('replace')}` : (o.receiptNumber ? `<div style="margin-top:6px">Чек № ${esc(o.receiptNumber)}</div>` : '')}</div></div>`,
+      issued: `${msgBox('info', 'Счетчик уже выдан', `${fmtDT(o.issuedAt)}, серийный № ${o.serialNumber}. Для возврата откройте вкладку «Возврат».`)}${o.hasReceiptPhoto ? `<a class="btn sm sec" style="margin-top:8px" href="/api/receipts/${o.num}" target="_blank" rel="noopener">${ic('image', 16)}Фото чека</a>` : ''}`,
       returned: msgBox('info', 'Оформлен возврат', `${fmtDT(o.returnedAt)}. ТУ разблокировано.`),
       cancelled: msgBox('err', 'Заказ отменён', 'Время на оплату истекло. Покупателю нужно оформить новый заказ.'),
     }[o.status];
@@ -140,6 +153,8 @@ const Seller = {
       <div class="input-row"><input class="input" id="rq" data-in="sRetQ" placeholder="Серийный номер" value="${esc(this.retQ)}" autocapitalize="characters" aria-label="Серийный номер"><button class="btn sec" data-act="sScanRet" aria-label="Сканировать штрих-код">${ic('barcode', 22)}</button><button class="btn" data-act="sRetFind" aria-label="Найти">${ic('search', 20)}</button></div>
       ${body}`, 'Возврат счетчика'));
   },
+  clearReceipt() { if (this.receipt) URL.revokeObjectURL(this.receipt.url); this.receipt = null; },
+
   period(days) {
     const d = n => new Date(Date.now() + 5 * 3600000 - n * 86400000).toISOString().slice(0, 10);
     this.rFrom = d(days); this.rTo = d(0); this.rPage = 0;
@@ -216,11 +231,24 @@ Object.assign(Staff.ACT, {
     await Seller.findReturn();
   },
   async sPay(btn) {
-    const receipt = $('#rcpt').value.trim();
-    if (!receipt) { toast('Укажите номер кассового чека'); $('#rcpt').focus(); return; }
+    if (!Seller.receipt) return toast('Сфотографируйте кассовый чек');
+    const fd = new FormData(); fd.append('photo', Seller.receipt.blob, 'receipt.jpg');
     await busy(btn, () => guard(async () => {
-      Seller.order = await POST(`/api/seller/orders/${Seller.order.num}/pay`, { receiptNumber: receipt });
+      try { Seller.order = await api('POST', `/api/seller/orders/${Seller.order.num}/pay`, fd); }
+      catch (e) { toast(e.message); return; }
+      Seller.clearReceipt();
       toast('Оплата подтверждена');
+      Seller.renderOrder();
+    }));
+  },
+  async sReceiptReplace(btn) {
+    if (!Seller.receipt) return;
+    const fd = new FormData(); fd.append('photo', Seller.receipt.blob, 'receipt.jpg');
+    await busy(btn, () => guard(async () => {
+      try { Seller.order = await api('POST', `/api/seller/orders/${Seller.order.num}/receipt`, fd); }
+      catch (e) { toast(e.message); return; }
+      Seller.clearReceipt();
+      toast('Фото чека заменено');
       Seller.renderOrder();
     }));
   },
@@ -262,6 +290,16 @@ Object.assign(Staff.IN, {
 Object.assign(Staff.CH, {
   sChk(t) { Seller.f.checklist[t.dataset.k] = t.checked; Seller.refreshIssue(); },
   sRetChk(t) { $('#rbtn').disabled = !t.checked; },
+  async sReceipt(t) {
+    const file = t.files[0]; if (!file) return;
+    toast('Сжимаю фото…');
+    try {
+      const blob = await compressImage(file, 500 * 1024);
+      Seller.clearReceipt();
+      Seller.receipt = { blob, url: URL.createObjectURL(blob) };
+      Seller.renderOrder();
+    } catch (e) { toast(e.message); }
+  },
   sRr(t) { const bad = t.value === 'Неисправность счетчика'; const w = $('#rstockWrap'); if (w && Seller.ret?.stockTracked) { w.classList.toggle('hide', bad); if (bad) $('#rstock').checked = false; } },
   sFrom(t) { Seller.rFrom = t.value || Seller.rFrom; if (Seller.rFrom > Seller.rTo) Seller.rTo = Seller.rFrom; Seller.rPage = 0; return Seller.show(); },
   sTo(t) { Seller.rTo = t.value || Seller.rTo; if (Seller.rTo < Seller.rFrom) Seller.rFrom = Seller.rTo; Seller.rPage = 0; return Seller.show(); },

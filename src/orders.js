@@ -11,7 +11,8 @@ const expirePending = client =>
 const ORDER_SELECT = `
   SELECT o.*, t.iin, t.owner_name, t.address, t.is_legal, t.branch,
          p.region AS point_region, p.address AS point_address, p.hours AS point_hours,
-         ui.full_name AS issued_by_name, ur.full_name AS returned_by_name
+         ui.full_name AS issued_by_name, ur.full_name AS returned_by_name,
+         EXISTS (SELECT 1 FROM receipt_photos rp WHERE rp.order_num = o.num) AS has_receipt_photo
   FROM orders o
   JOIN tu_records t ON t.tu_number = o.tu_number
   JOIN points p ON p.id = o.point_id
@@ -40,7 +41,7 @@ function staffOrder(o, user) {
     ...publicOrder(o),
     ownerFullName: o.owner_name, iin: o.iin, isLegal: o.is_legal, branch: o.branch, pointId: o.point_id,
     otherPoint: user?.role === 'seller' && o.point_id !== user.point_id,
-    paidAt: o.paid_at, receiptNumber: o.receipt_number, paidSource: o.paid_source,
+    paidAt: o.paid_at, receiptNumber: o.receipt_number, paidSource: o.paid_source, hasReceiptPhoto: o.has_receipt_photo,
     issuedAt: o.issued_at, issuedBy: o.issued_by_name, serialNumber: o.serial_number, recipient: o.recipient,
     proxy: o.recipient === 'proxy' ? { number: o.proxy_number, date: o.proxy_date, iin: o.proxy_iin } : null,
     returnedAt: o.returned_at, returnedBy: o.returned_by_name, returnReason: o.return_reason,

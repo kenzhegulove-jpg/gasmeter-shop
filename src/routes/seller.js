@@ -1,5 +1,6 @@
 'use strict';
 const express = require('express');
+const multer = require('multer');
 const { q, tx } = require('../db');
 const { HttpError, bad, digits, isIIN, str } = require('../util');
 const { requireRole } = require('../security/session');
@@ -40,15 +41,44 @@ r.get('/orders/:num', async (req, res) => {
   res.set('Cache-Control', 'no-store').json(staffOrder(o, req.user));
 });
 
-/** Подтверждение оплаты по номеру кассового чека (если касса не передаёт оплату автоматически) */
-r.post('/orders/:num/pay', async (req, res) => {
-  const receipt = str(req.body?.receiptNumber, 50);
-  if (!receipt) throw bad('Укажите номер кассового чека', 'receipt');
+/**
+ * Подтверждение оплаты фотографией кассового чека.
+ * Фото сжимается на телефоне продавца; сервер принимает только JPEG не более 500 КБ.
+ */
+const RECEIPT_MAX = 500 * 1024;
+const receiptUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: RECEIPT_MAX, files: 1 } });
+function receiptFile(req) {
+  const f = req.file;
+  if (!f) throw bad('Сфотографируйте кассовый чек', 'receipt');
+  if (!(f.buffer[0] === 0xff && f.buffer[1] === 0xd8 && f.buffer[2] === 0xff)) throw bad('Фото чека должно быть в формате JPEG', 'receipt_format');
+  return f.buffer;
+}
+const saveReceipt = (c, num, buf, userId) => c.query(`INSERT INTO receipt_photos (order_num, mime, data, size, uploaded_by) VALUES ($1,'image/jpeg',$2,$3,$4)
+  ON CONFLICT (order_num) DO UPDATE SET data=EXCLUDED.data, size=EXCLUDED.size, uploaded_by=EXCLUDED.uploaded_by, created_at=now()`, [num, buf, buf.length, userId]);
+
+r.post('/orders/:num/pay', receiptUpload.single('photo'), async (req, res) => {
   const num = Number(req.params.num) || 0;
+  const buf = receiptFile(req);
   await expirePending();
-  const u = await q("UPDATE orders SET status='paid', paid_at=now(), paid_by=$2, paid_source='seller', receipt_number=$3 WHERE num=$1 AND status='pending' RETURNING num", [num, req.user.id, receipt]);
-  if (!u.rowCount) throw new HttpError(409, 'Оплату можно подтвердить только для заказа в статусе «Ожидает оплаты»', 'status');
-  await audit(req, 'order_paid', 'order', num, { receipt });
+  await tx(async c => {
+    const u = await c.query("UPDATE orders SET status='paid', paid_at=now(), paid_by=$2, paid_source='seller' WHERE num=$1 AND status='pending' RETURNING num", [num, req.user.id]);
+    if (!u.rowCount) throw new HttpError(409, 'Оплату можно подтвердить только для заказа в статусе «Ожидает оплаты»', 'status');
+    await saveReceipt(c, num, buf, req.user.id);
+  });
+  await audit(req, 'order_paid', 'order', num, { receiptPhotoKb: Math.round(buf.length / 1024) });
+  res.json(staffOrder(await getOrder(num), req.user));
+});
+
+/** Замена фото чека — пока счетчик не выдан */
+r.post('/orders/:num/receipt', receiptUpload.single('photo'), async (req, res) => {
+  const num = Number(req.params.num) || 0;
+  const buf = receiptFile(req);
+  await tx(async c => {
+    const o = (await c.query('SELECT status FROM orders WHERE num=$1 FOR UPDATE', [num])).rows[0];
+    if (!o || o.status !== 'paid') throw new HttpError(409, 'Фото чека можно заменить только у оплаченного, еще не выданного заказа', 'status');
+    await saveReceipt(c, num, buf, req.user.id);
+  });
+  await audit(req, 'receipt_replaced', 'order', num);
   res.json(staffOrder(await getOrder(num), req.user));
 });
 

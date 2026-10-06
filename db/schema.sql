@@ -214,3 +214,19 @@ CREATE INDEX IF NOT EXISTS stock_moves_order ON stock_moves (order_num) WHERE or
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS return_to_stock boolean;
 CREATE INDEX IF NOT EXISTS orders_issued_at ON orders (issued_at DESC) WHERE issued_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS orders_point_product_active ON orders (point_id, product_id) WHERE status IN ('pending', 'paid');
+
+-- ===== v1.3.0: роль «Финансист», фото кассового чека =====
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'seller', 'finance'));
+ALTER TABLE users DROP CONSTRAINT IF EXISTS seller_has_point;
+ALTER TABLE users ADD CONSTRAINT seller_has_point CHECK (role <> 'seller' OR point_id IS NOT NULL);
+
+-- Фото кассового чека (JPEG не более 500 КБ), одно на заказ
+CREATE TABLE IF NOT EXISTS receipt_photos (
+  order_num   bigint PRIMARY KEY REFERENCES orders(num),
+  mime        text NOT NULL,
+  data        bytea NOT NULL,
+  size        int NOT NULL,
+  uploaded_by int REFERENCES users(id),
+  created_at  timestamptz NOT NULL DEFAULT now()
+);

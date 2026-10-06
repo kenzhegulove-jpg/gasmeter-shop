@@ -102,7 +102,7 @@ async function boot() {
   catch (e) { if (e.status === 401) return showLogin(); throw e; }
   if (Staff.me.mustChangePassword) return showForcedChange();
   if (Staff.me.role === 'seller') return Seller.start();
-  if (Staff.me.role === 'admin') return Admin.start();
+  if (Staff.me.role === 'admin' || Staff.me.role === 'finance') return Admin.start();
 }
 /** Обработка истёкшей сессии в любом запросе */
 async function guard(fn) {

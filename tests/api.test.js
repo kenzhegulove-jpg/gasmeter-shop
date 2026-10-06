@@ -28,6 +28,10 @@ async function call(who, method, path, body, form) {
   return { status: r.status, data };
 }
 const captcha = async () => (await call('anon', 'GET', '/api/captcha')).data.id;
+// Минимальный корректный JPEG (1×1) — для фото кассового чека
+const JPEG = Buffer.from('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=', 'base64');
+const photoForm = (buf = JPEG, name = 'receipt.jpg') => { const fd = new FormData(); fd.append('photo', new Blob([buf]), name); return fd; };
+const pay = (who, num, buf) => call(who, 'POST', `/api/seller/orders/${num}/pay`, undefined, photoForm(buf));
 
 test.before(async () => {
   await migrate();
@@ -88,7 +92,17 @@ test('полный сценарий: загрузка ТУ → заказ → в
 
   r = await call('seller', 'POST', `/api/seller/orders/${num}/issue`, { serialNumber: 'X1', checklist: { id: true, passport: true, stamp: true, sticker: true } });
   assert.strictEqual(r.data.code, 'status'); // ещё не оплачен
-  r = await call('seller', 'POST', `/api/seller/orders/${num}/pay`, { receiptNumber: '777' });
+  r = await pay('seller', num, Buffer.from('not an image'));
+  assert.strictEqual(r.data.code, 'receipt_format');
+  r = await pay('seller', num, Buffer.concat([JPEG, Buffer.alloc(520 * 1024)]));
+  assert.strictEqual(r.status, 400); // больше 500 КБ
+  r = await call('seller', 'POST', `/api/seller/orders/${num}/pay`, {});
+  assert.strictEqual(r.data.code, 'receipt'); // без фото — отклонено
+  r = await pay('seller', num);
+  assert.strictEqual(r.data.hasReceiptPhoto, true);
+  const ph = await fetch(`${base}/api/receipts/${num}`, { headers: { Cookie: jar.seller } });
+  assert.strictEqual(ph.headers.get('content-type'), 'image/jpeg');
+  assert.strictEqual(r.data.status, 'paid');
   assert.strictEqual(r.data.status, 'paid');
   r = await call('seller', 'POST', `/api/seller/orders/${num}/issue`, { serialNumber: 'X1', checklist: { id: true, passport: true, stamp: true } });
   assert.strictEqual(r.data.code, 'incomplete');
@@ -174,7 +188,7 @@ test('остатки: бронь, защита последней штуки, в
   assert.strictEqual(r.data[0].inStock, false); // 1 на складе, 1 в брони
 
   // Выдача списывает остаток
-  await call('seller', 'POST', `/api/seller/orders/${num}/pay`, { receiptNumber: '901' });
+  await pay('seller', num);
   r = await call('seller', 'POST', `/api/seller/orders/${num}/issue`, { serialNumber: 'ST-1', checklist: { id: true, passport: true, stamp: true, sticker: true } });
   assert.strictEqual(r.data.status, 'issued');
   r = await call('adm2', 'GET', '/api/admin/stock');
@@ -241,6 +255,41 @@ test('остатки: одновременные заказы последней
   assert.strictEqual(results.filter(r => r.status === 201).length, 1);
   assert.strictEqual(results.filter(r => r.data.code === 'out_of_stock').length, 4);
   await call('adm2', 'PUT', '/api/admin/settings', { stockEnabled: false });
+});
+
+test('финансист: только просмотр и выгрузка отчетов', async () => {
+  let r = await call('adm2', 'POST', '/api/admin/sellers', { role: 'finance', fullName: 'Финансова Фатима Фаридовна', login: 'f.finance' });
+  assert.strictEqual(r.status, 201);
+  const temp = r.data.tempPassword;
+  await call('fin', 'POST', '/api/auth/login', { login: 'f.finance', password: temp, captchaId: await captcha(), captchaText: 'TEST' });
+  r = await call('fin', 'POST', '/api/auth/change-credentials', { currentPassword: temp, newPassword: 'Otchety#2026kz' });
+  assert.strictEqual(r.status, 200);
+  r = await call('fin', 'GET', '/api/auth/me');
+  assert.strictEqual(r.data.role, 'finance');
+  // разрешено: отчеты, реестр, остатки, выгрузки, фото чеков
+  for (const p of ['/api/admin/reports/summary', '/api/admin/reports/export.xlsx', '/api/admin/sales', '/api/admin/sales/export.xlsx', '/api/admin/stock', '/api/admin/stock/moves', '/api/admin/points']) {
+    r = await call('fin', 'GET', p);
+    assert.strictEqual(r.status, 200, p);
+  }
+  const anyReceipt = (await q('SELECT order_num FROM receipt_photos LIMIT 1')).rows[0].order_num;
+  r = await fetch(`${base}/api/receipts/${anyReceipt}`, { headers: { Cookie: jar.fin } });
+  assert.strictEqual(r.status, 200);
+  // запрещено: любые изменения и служебные разделы
+  const denied = [
+    ['GET', '/api/admin/settings'], ['PUT', '/api/admin/settings', { stockEnabled: true }],
+    ['GET', '/api/admin/sellers'], ['POST', '/api/admin/sellers', { role: 'seller', fullName: 'Хакер Хакер', login: 'hack', pointId: 1 }],
+    ['POST', '/api/admin/stock/receipt', { pointId: 1, productId: 1, qty: 5 }], ['POST', '/api/admin/points', { region: 'Астана', address: 'x' }],
+    ['PUT', '/api/admin/products/1', { name: 'x', price: 1 }], ['GET', '/api/admin/tu'], ['GET', '/api/admin/audit'],
+    ['GET', '/api/seller/orders-active'], ['GET', '/api/admin/site-qr.pdf'],
+  ];
+  for (const [m, p, b] of denied) {
+    r = await call('fin', m, p, b);
+    assert.strictEqual(r.status, 403, `${m} ${p}`);
+  }
+  // финансиста можно перевести в продавцы только с точкой
+  const id = (await q("SELECT id FROM users WHERE login='f.finance'")).rows[0].id;
+  r = await call('adm2', 'PUT', `/api/admin/sellers/${id}`, { role: 'seller', fullName: 'Финансова Фатима Фаридовна', login: 'f.finance' });
+  assert.strictEqual(r.data.code, 'point');
 });
 
 test('CSRF: запрос без заголовка отклоняется', async () => {

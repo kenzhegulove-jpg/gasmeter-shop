@@ -1,12 +1,15 @@
 /* Кабинет администратора */
 'use strict';
-const ATABS = [['reports', 'Отчеты', 'chart'], ['sales', 'Реестр продаж', 'doc'], ['stock', 'Остатки', 'box'], ['points', 'Точки продаж', 'store'], ['sellers', 'Продавцы', 'users'], ['products', 'Товары', 'box'], ['tu', 'База ТУ', 'db'], ['audit', 'Журнал', 'doc'], ['settings', 'Настройки', 'key'], ['profile', 'Профиль', 'user']];
+const ATABS = [['reports', 'Отчеты', 'chart'], ['sales', 'Реестр продаж', 'doc'], ['stock', 'Остатки', 'box'], ['points', 'Точки продаж', 'store'], ['sellers', 'Сотрудники', 'users'], ['products', 'Товары', 'box'], ['tu', 'База ТУ', 'db'], ['audit', 'Журнал', 'doc'], ['settings', 'Настройки', 'key'], ['profile', 'Профиль', 'user']];
 const ACTIONS = {
   login: 'Вход', login_locked: 'Блокировка входа', change_credentials: 'Смена логина/пароля', order_paid: 'Подтверждена оплата', order_issued: 'Выдан счетчик',
-  order_returned: 'Возврат', point_create: 'Создана точка', point_update: 'Изменена точка', seller_create: 'Создан продавец', seller_update: 'Изменен продавец',
-  seller_block: 'Продавец заблокирован', seller_unblock: 'Продавец разблокирован', seller_reset_password: 'Сброс пароля продавца', product_create: 'Создан товар',
+  order_returned: 'Возврат', point_create: 'Создана точка', point_update: 'Изменена точка', seller_create: 'Создан сотрудник', seller_update: 'Изменен сотрудник',
+  seller_block: 'Сотрудник заблокирован', seller_unblock: 'Сотрудник разблокирован', seller_reset_password: 'Сброс пароля сотрудника', receipt_replaced: 'Заменено фото чека', product_create: 'Создан товар',
   product_update: 'Изменен товар', settings_update: 'Изменены настройки', stock_receipt: 'Приход товара', stock_correction: 'Корректировка остатка', sales_export: 'Выгрузка реестра продаж', product_photo_add: 'Добавлено фото', product_photo_delete: 'Удалено фото', tu_import: 'Загрузка базы ТУ', report_export: 'Выгрузка отчета',
 };
+// Финансисту доступны только отчеты (просмотр и выгрузка) и свой профиль
+const FINANCE_TABS = ['reports', 'sales', 'stock', 'profile'];
+const isFinance = () => Staff.me?.role === 'finance';
 const today = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Almaty' });
 const daysAgo = n => new Date(Date.now() - n * 86400000).toLocaleDateString('sv-SE', { timeZone: 'Asia/Almaty' });
 
@@ -17,8 +20,8 @@ const Admin = {
   async start() { this.tab = 'reports'; await this.show(); },
 
   shell(title, actions, content) {
-    return `<div class="admin"><aside class="side">${logoStaff('Администратор')}
-      ${ATABS.map(([k, l, i]) => `<button class="nav ${this.tab === k ? 'on' : ''}" data-act="aTab" data-t="${k}">${ic(i, 20)}${l}</button>`).join('')}
+    return `<div class="admin"><aside class="side">${logoStaff(isFinance() ? 'Финансист' : 'Администратор')}
+      ${ATABS.filter(([k]) => !isFinance() || FINANCE_TABS.includes(k)).map(([k, l, i]) => `<button class="nav ${this.tab === k ? 'on' : ''}" data-act="aTab" data-t="${k}">${ic(i, 20)}${l}</button>`).join('')}
       <div class="spacer"></div><button class="nav" data-act="logout">${ic('logout', 20)}Выйти</button></aside>
       <main class="amain"><div class="ahead"><h1>${title}</h1><div class="btn-row">${actions || ''}</div></div>${content}</main></div>`;
   },
@@ -68,11 +71,12 @@ const Admin = {
       </div>
       <div class="toolbar"><label class="search">${ic('search', 18)}<input id="sfq" placeholder="ИИН, № ТУ, серийный №, ФИО" value="${esc(f.q)}" aria-label="Поиск"></label><button class="btn sm" data-act="aSfSearch">Найти</button></div>
       <div class="kpis"><div class="kpi"><span>Выдано, шт.</span><b>${t.issued}</b></div><div class="kpi"><span>Сумма выданных, ₸</span><b>${fmt(t.revenue)}</b></div><div class="kpi"><span>Возвратов</span><b>${t.returned}</b></div></div>
-      <div class="table-wrap"><table><thead><tr><th>Дата выдачи</th><th>№ заказа</th><th>Товар</th><th>Серийный №</th><th>Владелец ТУ</th><th>Номер ТУ</th><th>Точка</th><th>Продавец</th><th>Получатель</th><th>Статус</th></tr></thead><tbody>
+      <div class="table-wrap"><table><thead><tr><th>Дата выдачи</th><th>№ заказа</th><th>Товар</th><th>Серийный №</th><th>Владелец ТУ</th><th>Номер ТУ</th><th>Точка</th><th>Продавец</th><th>Получатель</th><th>Чек</th><th>Статус</th></tr></thead><tbody>
         ${r.rows.map(o => `<tr><td style="white-space:nowrap">${fmtDT(o.issued_at)}</td><td>${o.num}</td><td>${esc(o.product_name)}</td><td style="white-space:nowrap">${esc(o.serial_number || '')}</td>
           <td>${esc(o.owner_name)}<div class="muted sm">${maskIIN(o.iin)}</div></td><td style="white-space:nowrap">${esc(o.tu_number)}</td><td>${esc(o.point_region)}<div class="muted sm">${esc(o.point_address)}</div></td>
           <td>${esc(o.seller_name || '')}</td><td class="sm">${o.recipient === 'proxy' ? `Представитель<div class="muted">дов. № ${esc(o.proxy_number || '')}</div>` : 'Владелец'}</td>
-          <td>${pill(o.status)}${o.status === 'returned' ? `<div class="muted sm">${fmtDate(o.returned_at)}${o.return_to_stock ? ', в остаток' : ''}</div>` : ''}</td></tr>`).join('') || '<tr><td colspan="10" class="muted">За выбранный период выдач нет</td></tr>'}
+          <td class="sm">${o.has_receipt_photo ? `<a href="/api/receipts/${o.num}" target="_blank" rel="noopener" style="color:var(--brand-ink)">фото</a>` : esc(o.receipt_number || '—')}</td>
+          <td>${pill(o.status)}${o.status === 'returned' ? `<div class="muted sm">${fmtDate(o.returned_at)}${o.return_to_stock ? ', в остаток' : ''}</div>` : ''}</td></tr>`).join('') || '<tr><td colspan="11" class="muted">За выбранный период выдач нет</td></tr>'}
       </tbody></table>
       ${pages > 1 ? `<div class="pager"><span class="muted sm">${f.page * r.pageSize + 1}–${Math.min(t.count, (f.page + 1) * r.pageSize)} из ${t.count}</span><button class="btn sm line" data-act="aSfPage" data-d="-1" ${f.page ? '' : 'disabled'}>${ic('back', 16)}</button><button class="btn sm line" data-act="aSfPage" data-d="1" ${f.page + 1 < pages ? '' : 'disabled'}>${ic('chev', 16)}</button></div>` : ''}</div>`);
   },
@@ -84,8 +88,8 @@ const Admin = {
     const cell = (pt, pr) => d.cells.find(c => c.point_id === pt && c.product_id === pr) || { on_hand: 0, reserved: 0, available: 0 };
     const thr = d.settings.lowStockThreshold;
     const REASONS = { receipt: 'Приход', correction: 'Корректировка', issue: 'Выдача', return: 'Возврат' };
-    return this.shell('Остатки по точкам', `<button class="btn sm" data-act="aStockOp" data-op="receipt">${ic('plus', 18)}Приход</button><button class="btn sm line" data-act="aStockOp" data-op="correction">${ic('edit', 18)}Корректировка</button>`, `
-      ${d.settings.stockEnabled ? '' : `<div style="margin-bottom:14px">${msgBox('warn', 'Учет остатков выключен', 'Покупатели могут заказывать без ограничения количества. Внесите приход по всем точкам, затем включите учет в разделе «Настройки».')}</div>`}
+    return this.shell('Остатки по точкам', isFinance() ? '' : `<button class="btn sm" data-act="aStockOp" data-op="receipt">${ic('plus', 18)}Приход</button><button class="btn sm line" data-act="aStockOp" data-op="correction">${ic('edit', 18)}Корректировка</button>`, `
+      ${d.settings.stockEnabled ? '' : `<div style="margin-bottom:14px">${msgBox('warn', 'Учет остатков выключен', isFinance() ? 'Количество товара при заказе пока не ограничивается.' : 'Покупатели могут заказывать без ограничения количества. Внесите приход по всем точкам, затем включите учет в разделе «Настройки».')}</div>`}
       <p class="muted sm" style="margin-bottom:10px">В каждой ячейке: <b>доступно к заказу</b> / на складе (в брони). Красным — товар закончился, желтым — осталось ${thr} шт. и меньше.</p>
       <div class="table-wrap"><table><thead><tr><th>Точка продаж</th>${d.products.map(p => `<th class="num" style="white-space:normal;min-width:110px">${esc(p.name)}</th>`).join('')}</tr></thead><tbody>
         ${d.points.map(pt => `<tr><td><b style="font-weight:600">${esc(pt.region)}</b><div class="muted sm">${esc(pt.address)}</div></td>${d.products.map(pr => { const c = cell(pt.id, pr.id); const col = c.available === 0 ? 'var(--danger)' : c.available <= thr ? '#8A5D00' : 'var(--ink)'; return `<td class="num"><b style="font-size:17px;color:${col}">${c.available}</b><div class="muted sm">${c.on_hand}${c.reserved ? ` (${c.reserved})` : ''}</div></td>`; }).join('')}</tr>`).join('') || `<tr><td colspan="${d.products.length + 1}" class="muted">Нет действующих точек продаж</td></tr>`}
@@ -158,22 +162,23 @@ const Admin = {
   /* ----- Продавцы ----- */
   async vSellers() {
     [this.sellers, this.points] = await Promise.all([GET('/api/admin/sellers'), GET('/api/admin/points')]);
-    return this.shell('Продавцы', `<button class="btn sm" data-act="aSellerEdit" data-id="">${ic('plus', 18)}Добавить продавца</button>`, `
-      <div class="table-wrap"><table><thead><tr><th>ФИО</th><th>Логин</th><th>Точка продаж</th><th>Последний вход</th><th>Статус</th><th></th></tr></thead><tbody>
-      ${this.sellers.map(s => `<tr><td><b style="font-weight:600">${esc(s.full_name)}</b></td><td>${esc(s.login)}</td><td>${esc(s.point_region || '')}<div class="muted sm">${esc(s.point_address || '')}</div></td><td style="white-space:nowrap">${s.last_login_at ? fmtDT(s.last_login_at) : '<span class="muted">не входил</span>'}</td>
+    return this.shell('Сотрудники', `<button class="btn sm" data-act="aSellerEdit" data-id="">${ic('plus', 18)}Добавить сотрудника</button>`, `
+      <div class="table-wrap"><table><thead><tr><th>ФИО</th><th>Роль</th><th>Логин</th><th>Точка продаж</th><th>Последний вход</th><th>Статус</th><th></th></tr></thead><tbody>
+      ${this.sellers.map(s => `<tr><td><b style="font-weight:600">${esc(s.full_name)}</b></td><td>${s.role === 'finance' ? 'Финансист' : 'Продавец'}</td><td>${esc(s.login)}</td><td>${s.role === 'finance' ? '<span class="muted">—</span>' : `${esc(s.point_region || '')}<div class="muted sm">${esc(s.point_address || '')}</div>`}</td><td style="white-space:nowrap">${s.last_login_at ? fmtDT(s.last_login_at) : '<span class="muted">не входил</span>'}</td>
         <td>${s.blocked ? '<span class="pill blocked">Заблокирован</span>' : s.locked ? '<span class="pill pending">Вход заблокирован на 60 мин</span>' : s.must_change_password ? '<span class="pill pending">Ждет смены пароля</span>' : '<span class="pill active">Активен</span>'}</td>
         <td><div class="td-actions"><button class="btn sm line" data-act="aSellerEdit" data-id="${s.id}" aria-label="Изменить" title="Изменить">${ic('edit', 16)}</button>
           <button class="btn sm line" data-act="aSellerReset" data-id="${s.id}" title="Сбросить пароль">${ic('key', 16)}</button>
-          <button class="btn sm ${s.blocked ? 'sec' : 'line'}" data-act="aSellerBlock" data-id="${s.id}" data-b="${s.blocked ? 0 : 1}">${ic(s.blocked ? 'unlock' : 'lock', 16)}${s.blocked ? 'Разблокировать' : 'Заблокировать'}</button></div></td></tr>`).join('') || '<tr><td colspan="6" class="muted">Продавцов пока нет</td></tr>'}
+          <button class="btn sm ${s.blocked ? 'sec' : 'line'}" data-act="aSellerBlock" data-id="${s.id}" data-b="${s.blocked ? 0 : 1}">${ic(s.blocked ? 'unlock' : 'lock', 16)}${s.blocked ? 'Разблокировать' : 'Заблокировать'}</button></div></td></tr>`).join('') || '<tr><td colspan="7" class="muted">Сотрудников пока нет</td></tr>'}
       </tbody></table></div>`);
   },
   sellerModal(id) {
-    const s = this.sellers.find(x => x.id === Number(id)) || { full_name: '', login: '', point_id: null };
-    openModal(`<div class="sheet-head"><h2>${id ? 'Изменить продавца' : 'Новый продавец'}</h2><button class="iconbtn" data-act="closeModal" aria-label="Закрыть">${ic('x', 22)}</button></div>
+    const s = this.sellers.find(x => x.id === Number(id)) || { role: 'seller', full_name: '', login: '', point_id: null };
+    openModal(`<div class="sheet-head"><h2>${id ? 'Изменить сотрудника' : 'Новый сотрудник'}</h2><button class="iconbtn" data-act="closeModal" aria-label="Закрыть">${ic('x', 22)}</button></div>
+      <div class="field"><label for="srole">Роль</label><select class="input" id="srole" data-ch="aRole"><option value="seller" ${s.role === 'seller' ? 'selected' : ''}>Продавец — выдача счетчиков на точке</option><option value="finance" ${s.role === 'finance' ? 'selected' : ''}>Финансист — только просмотр и выгрузка отчетов</option></select></div>
       <div class="field"><label for="sf">ФИО</label><input class="input" id="sf" value="${esc(s.full_name)}" maxlength="200"></div>
       <div class="field"><label for="sl">Логин</label><input class="input" id="sl" value="${esc(s.login)}" autocomplete="off" autocapitalize="off" maxlength="32"><span class="muted sm">3–32 символа: латинские буквы, цифры, точка, дефис, подчеркивание</span></div>
-      <div class="field"><label for="spt">Точка продаж</label><select class="input" id="spt"><option value="">Выберите точку</option>${this.points.filter(p => p.active).map(p => `<option value="${p.id}" ${s.point_id === p.id ? 'selected' : ''}>${esc(p.region)}, ${esc(p.address)}</option>`).join('')}</select></div>
-      ${id ? '' : msgBox('info', '', 'Система создаст временный пароль. Продавец сменит его при первом входе на собственный, соответствующий требованиям к паролю.') + '<div style="height:14px"></div>'}
+      <div class="field ${s.role === 'finance' ? 'hide' : ''}" id="sptWrap"><label for="spt">Точка продаж</label><select class="input" id="spt"><option value="">Выберите точку</option>${this.points.filter(p => p.active).map(p => `<option value="${p.id}" ${s.point_id === p.id ? 'selected' : ''}>${esc(p.region)}, ${esc(p.address)}</option>`).join('')}</select></div>
+      ${id ? '' : msgBox('info', '', 'Система создаст временный пароль. Сотрудник сменит его при первом входе на собственный, соответствующий требованиям к паролю.') + '<div style="height:14px"></div>'}
       <div id="merr"></div><button class="btn block" data-act="aSellerSave" data-id="${id || ''}">Сохранить</button>`);
   },
   showTempPassword(title, login, pass) {
@@ -260,7 +265,7 @@ const Admin = {
   },
 
   async vProfile() {
-    return this.shell('Профиль', '', `<div style="max-width:560px"><div class="card" style="margin-bottom:12px"><div class="person"><span class="avatar">${esc(Staff.me.fullName[0])}</span><div><b>${esc(Staff.me.fullName)}</b><div class="muted sm">Администратор, логин ${esc(Staff.me.login)}</div></div></div></div>${credForm(false)}</div>`);
+    return this.shell('Профиль', '', `<div style="max-width:560px"><div class="card" style="margin-bottom:12px"><div class="person"><span class="avatar">${esc(Staff.me.fullName[0])}</span><div><b>${esc(Staff.me.fullName)}</b><div class="muted sm">${isFinance() ? 'Финансист' : 'Администратор'}, логин ${esc(Staff.me.login)}</div></div></div></div>${credForm(false)}</div>`);
   },
 };
 
@@ -278,24 +283,24 @@ Object.assign(Staff.ACT, {
   },
   aSellerEdit(t) { Admin.sellerModal(t.dataset.id); },
   async aSellerSave(btn) {
-    const body = { fullName: $('#sf').value.trim(), login: $('#sl').value.trim(), pointId: Number($('#spt').value) || 0 };
-    if (!body.fullName || !body.login || !body.pointId) { $('#merr').innerHTML = Admin.err('Заполните ФИО, логин и точку продаж'); return; }
+    const body = { role: $('#srole').value, fullName: $('#sf').value.trim(), login: $('#sl').value.trim(), pointId: Number($('#spt').value) || 0 };
+    if (!body.fullName || !body.login || (body.role === 'seller' && !body.pointId)) { $('#merr').innerHTML = Admin.err(body.role === 'seller' ? 'Заполните ФИО, логин и точку продаж' : 'Заполните ФИО и логин'); return; }
     await busy(btn, () => guard(async () => {
       let r;
       try { r = btn.dataset.id ? await PUT(`/api/admin/sellers/${btn.dataset.id}`, body) : await POST('/api/admin/sellers', body); }
       catch (e) { $('#merr').innerHTML = Admin.err(e.message); return; }
       await Admin.show();
-      if (r.tempPassword) Admin.showTempPassword('Продавец создан', body.login, r.tempPassword); else { closeModal(); toast('Данные продавца сохранены'); }
+      if (r.tempPassword) Admin.showTempPassword(body.role === 'finance' ? 'Финансист создан' : 'Продавец создан', body.login, r.tempPassword); else { closeModal(); toast('Данные сотрудника сохранены'); }
     }));
   },
   async aSellerBlock(t) {
     const block = t.dataset.b === '1';
-    if (block && !confirm('Заблокировать продавца? Его текущие сеансы будут завершены.')) return;
-    await guard(async () => { await POST(`/api/admin/sellers/${t.dataset.id}/block`, { blocked: block }); toast(block ? 'Продавец заблокирован' : 'Продавец разблокирован'); Admin.show(); });
+    if (block && !confirm('Заблокировать сотрудника? Его текущие сеансы будут завершены.')) return;
+    await guard(async () => { await POST(`/api/admin/sellers/${t.dataset.id}/block`, { blocked: block }); toast(block ? 'Сотрудник заблокирован' : 'Сотрудник разблокирован'); Admin.show(); });
   },
   async aSellerReset(t) {
     const s = Admin.sellers.find(x => x.id === Number(t.dataset.id));
-    if (!confirm(`Сбросить пароль продавца ${s.full_name}? Будет создан временный пароль.`)) return;
+    if (!confirm(`Сбросить пароль сотрудника ${s.full_name}? Будет создан временный пароль.`)) return;
     await guard(async () => { const r = await POST(`/api/admin/sellers/${s.id}/reset-password`); await Admin.show(); Admin.showTempPassword('Пароль сброшен', s.login, r.tempPassword); });
   },
   aProdEdit(t) { Admin.prodModal(t.dataset.id); },
@@ -347,6 +352,7 @@ Object.assign(Staff.IN, {
   aTuQ(t) { clearTimeout(tuTimer); tuTimer = setTimeout(async () => { Admin.tuQ = t.value.trim(); Admin.tuPage = 0; await Admin.show(); const n = $('#tuq'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 400); },
 });
 Object.assign(Staff.CH, {
+  aRole(t) { $('#sptWrap').classList.toggle('hide', t.value === 'finance'); },
   aSf(t) { Admin.sf[t.dataset.k] = t.value; if (Admin.sf.from > Admin.sf.to) Admin.sf.to = Admin.sf.from; Admin.sf.page = 0; return Admin.show(); },
   aMovesPoint(t) { Admin.movesPoint = t.value; return Admin.show(); },
   aStockSel() {

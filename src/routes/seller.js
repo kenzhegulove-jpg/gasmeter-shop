@@ -4,7 +4,7 @@ const multer = require('multer');
 const { q, tx } = require('../db');
 const { HttpError, bad, digits, isIIN, str } = require('../util');
 const { requireRole } = require('../security/session');
-const { expirePending, getOrder, staffOrder, ORDER_SELECT } = require('../orders');
+const { expirePending, getOrder, staffOrder, ORDER_SELECT, cancelPending } = require('../orders');
 const { audit } = require('../audit');
 const { getSettings } = require('../settings');
 const { moveStock, stockMatrix } = require('../stock');
@@ -83,25 +83,39 @@ r.post('/orders/:num/receipt', receiptUpload.single('photo'), async (req, res) =
 });
 
 const CHECKS = ['id', 'passport', 'stamp', 'sticker'];
+const RELATIONS = ['spouse', 'parent', 'child', 'sibling'];
+const docsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: RECEIPT_MAX, files: 2 } });
+const isJpeg = buf => buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
 
-r.post('/orders/:num/issue', async (req, res) => {
+/**
+ * Выдача счетчика. Получатель: владелец ТУ, представитель по доверенности или родственник
+ * (супруг(а), родитель, ребенок, брат/сестра). Для представителя и родственника — ИИН получателя
+ * и 1–2 фото подтверждающего документа (JPEG до 500 КБ каждое).
+ * Принимает multipart: поле data (JSON) и файлы docs; для совместимости — обычный JSON (только владелец).
+ */
+r.post('/orders/:num/issue', docsUpload.array('docs', 2), async (req, res) => {
   const num = Number(req.params.num) || 0;
-  const b = req.body || {};
+  let b = req.body || {};
+  if (typeof b.data === 'string') { try { b = JSON.parse(b.data); } catch { throw bad('Некорректный запрос'); } }
   const serial = str(b.serialNumber, 64).toUpperCase();
-  const recipient = b.recipient === 'proxy' ? 'proxy' : 'owner';
+  const recipient = ['proxy', 'relative'].includes(b.recipient) ? b.recipient : 'owner';
+  const relation = recipient === 'relative' ? (RELATIONS.includes(b.relation) ? b.relation : null) : null;
   const chk = b.checklist || {};
+  const files = req.files || [];
   const missing = [];
   if (!serial) missing.push('серийный номер');
-  const need = recipient === 'proxy' ? [...CHECKS, 'proxy'] : CHECKS;
+  const need = recipient === 'owner' ? CHECKS : [...CHECKS, 'docs'];
   if (need.some(k => chk[k] !== true)) missing.push('пункты чек-листа');
-  let proxy = { number: null, date: null, iin: null };
-  if (recipient === 'proxy') {
-    proxy = { number: str(b.proxyNumber, 50), date: str(b.proxyDate, 10), iin: digits(b.proxyIin) };
-    if (!proxy.number) missing.push('номер доверенности');
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(proxy.date) || new Date(proxy.date) > new Date()) missing.push('дата доверенности');
-    if (!isIIN(proxy.iin)) missing.push('ИИН доверенного лица (12 цифр)');
+  let recipientIin = null;
+  if (recipient !== 'owner') {
+    recipientIin = digits(b.recipientIin);
+    if (!isIIN(recipientIin)) missing.push('ИИН получателя (12 цифр)');
+    if (recipient === 'relative' && !relation) missing.push('степень родства');
+    if (!files.length) missing.push(recipient === 'proxy' ? 'фото доверенности' : 'фото документа о родстве');
   }
   if (missing.length) throw bad('Не заполнено: ' + missing.join(', '), 'incomplete', { missing });
+  if (recipient === 'owner' && files.length) throw bad('Фото документа нужно только для представителя или родственника', 'docs');
+  if (files.some(f => !isJpeg(f.buffer))) throw bad('Фото документа должно быть в формате JPEG', 'docs_format');
 
   const settings = await getSettings();
   await tx(async c => {
@@ -112,14 +126,26 @@ r.post('/orders/:num/issue', async (req, res) => {
     if (settings.stockEnabled) await moveStock(c, { pointId: o.point_id, productId: o.product_id, delta: -1, reason: 'issue', orderNum: num, userId: req.user.id });
     try {
       await c.query(`UPDATE orders SET status='issued', issued_at=now(), issued_by=$2, serial_number=$3, recipient=$4,
-        proxy_number=$5, proxy_date=$6, proxy_iin=$7, checklist=$8 WHERE num=$1`,
-        [num, req.user.id, serial, recipient, proxy.number, proxy.date, proxy.iin, JSON.stringify(Object.fromEntries(need.map(k => [k, true])))]);
+        proxy_number=NULL, proxy_date=NULL, proxy_iin=$5, relation=$6, checklist=$7 WHERE num=$1`,
+        [num, req.user.id, serial, recipient, recipientIin, relation, JSON.stringify(Object.fromEntries(need.map(k => [k, true])))]);
     } catch (e) {
       if (e.code === '23505') throw new HttpError(409, 'Счетчик с таким серийным номером уже числится выданным', 'serial_taken');
       throw e;
     }
+    for (const [i, f] of files.entries()) {
+      await c.query('INSERT INTO recipient_docs (order_num, position, mime, data, size, uploaded_by) VALUES ($1,$2,$3,$4,$5,$6)',
+        [num, i, 'image/jpeg', f.buffer, f.buffer.length, req.user.id]);
+    }
   });
-  await audit(req, 'order_issued', 'order', num, { serial, recipient });
+  await audit(req, 'order_issued', 'order', num, { serial, recipient, relation, docs: files.length });
+  res.json(staffOrder(await getOrder(num), req.user));
+});
+
+/** Отмена неоплаченного заказа продавцом (после сканирования QR / открытия заказа) */
+r.post('/orders/:num/cancel', async (req, res) => {
+  const num = Number(req.params.num) || 0;
+  if (!(await cancelPending(num, 'seller', req.user.id))) throw new HttpError(409, 'Отменить можно только заказ, ожидающий оплаты', 'cancel_status');
+  await audit(req, 'order_cancelled', 'order', num);
   res.json(staffOrder(await getOrder(num), req.user));
 });
 

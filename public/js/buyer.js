@@ -26,7 +26,7 @@ const render = html => { $('#app').innerHTML = html; tickDeadlines(); };
 function lastOrder() { try { return JSON.parse(localStorage.getItem(LAST_ORDER_KEY) || 'null'); } catch { return null; } }
 function vCatalog() {
   const q = S.q.trim().toLowerCase();
-  const items = S.catalog.filter(p => !q || p.name.toLowerCase().includes(q));
+  const items = S.catalog.filter(p => (!q || p.name.toLowerCase().includes(q)) && (!S.mfr || (S.mfr === 'none' ? !p.manufacturer_id : String(p.manufacturer_id) === String(S.mfr))));
   const lo = lastOrder();
   return `${topbar(true)}<main class="wrap">
     ${lo && Date.now() - lo.at < 3 * 86400000 ? `<a class="msg info" style="margin:0 0 14px;text-decoration:none" href="#/order/${lo.num}/${encodeURIComponent(lo.token)}">${ic('box', 20)}<div><b>${T('last_order', { num: lo.num })}</b>${T('last_order_open')}</div></a>` : ''}
@@ -36,16 +36,26 @@ function vCatalog() {
       <ol class="howto"><li>${T('how1')}</li><li>${T('how2')}</li><li>${T('how3')}</li></ol>
     </section>
     <h2 class="h2">${T('catalog')} <span class="muted">${items.length}</span></h2>
+    ${mfrFilter()}
     ${items.length ? `<div class="grid">${items.map(p => `
       <a class="pcard" href="#/p/${p.id}" style="text-decoration:none">
         <div class="pimg">${productImg(p)}</div>
-        <div class="pbody">${p.inStock ? `<span class="tag">${T('tag_price')}</span>` : `<span class="tag out">${T('out')}</span>`}<span class="pname">${esc(p.name)}</span><span class="price">${fmt(p.price)} ₸<small>${T('vat')}</small></span></div>
+        <div class="pbody">${p.inStock ? `<span class="tag">${T('tag_price')}</span>` : `<span class="tag out">${T('out')}</span>`}<span class="pname">${esc(p.name)}</span>${p.manufacturer_name ? `<span class="mfr-name">${esc(p.manufacturer_name)}</span>` : ''}<span class="price">${fmt(p.price)} ₸<small>${T('vat')}</small></span></div>
       </a>`).join('')}</div>`
       : `<div class="card" style="text-align:center">${S.catalog.length ? `<p>${T('nothing', { q: esc(S.q) })}</p><button class="btn ghost" data-act="clearQ">${T('show_all')}</button>` : `<p class="muted">${T('soon')}</p>`}</div>`}
   </main>`;
 }
 
 /* ---------- Карточка товара ---------- */
+/** Фильтр по производителю: показывается, если хотя бы у одного товара указан производитель */
+function mfrFilter() {
+  const m = new Map();
+  let none = false;
+  for (const p of S.catalog) { if (p.manufacturer_id) m.set(p.manufacturer_id, p.manufacturer_name); else none = true; }
+  if (!m.size) return '';
+  const chip = (v, l) => `<button class="${String(S.mfr) === String(v) ? 'on' : ''}" data-act="mfr" data-v="${v}">${esc(l)}</button>`;
+  return `<div class="mfr-filter" role="group" aria-label="${T('mfr')}">${chip('', T('mfr_all'))}${[...m].sort((a, b) => a[1].localeCompare(b[1])).map(([id, n]) => chip(id, n)).join('')}${none ? chip('none', T('mfr_none')) : ''}</div>`;
+}
 function vProduct(p) {
   const n = Math.max(1, p.photos.length);
   const slides = Array.from({ length: n }, (_, i) => `<div class="slide">${productImg(p, i)}</div>`).join('');
@@ -53,7 +63,7 @@ function vProduct(p) {
     <div class="gallery" id="gal">${slides}</div>
     ${n > 1 ? `<div class="dots" id="dots">${Array.from({ length: n }, (_, i) => `<i class="${i ? '' : 'on'}"></i>`).join('')}</div>
     <div class="thumbs">${Array.from({ length: n }, (_, i) => `<button class="${i ? '' : 'on'}" data-act="photo" data-i="${i}" aria-label="${T('photo_n', { n: i + 1 })}">${productImg(p, i)}</button>`).join('')}</div>` : '<div style="height:12px"></div>'}
-    <div class="card"><h1 class="title">${esc(p.name)}</h1><div class="price big">${fmt(p.price)} ₸ <small>${T('vat')}</small></div>
+    <div class="card"><h1 class="title">${esc(p.name)}</h1>${p.manufacturer_name ? `<div class="muted" style="margin-top:4px">${T('mfr')}: ${esc(p.manufacturer_name)}</div>` : ''}<div class="price big">${fmt(p.price)} ₸ <small>${T('vat')}</small></div>
       <div class="msg info" style="margin-top:0">${ic('info', 18)}<span>${T('special')}</span></div></div>
     ${p.specs?.length ? `<div class="card"><h2 class="h3">${T('specs')}</h2><dl class="kv">${p.specs.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl></div>` : ''}
     ${p.description ? `<div class="card"><h2 class="h3">${T('descr')}</h2><p>${esc(p.description)}</p></div>` : ''}
@@ -93,7 +103,7 @@ function vCheck(p) {
       <div class="field"><label for="iin">${T('iin')}</label><input class="input big" id="iin" data-in="iin" inputmode="numeric" autocomplete="off" placeholder="000000 000000" maxlength="13" value="${maskIIN(c.iin)}"></div>
       <div class="field"><label for="tu6">${T('tu6')}</label><input class="input big" id="tu6" data-in="tu6" inputmode="numeric" autocomplete="off" placeholder="000000" maxlength="6" value="${esc(c.tu6)}">
         <span class="muted sm">${T('tu6_example')}</span></div>
-      <div class="field"><label for="cap">${T('captcha')}</label>
+      <div class="field ${hasPass() ? 'hide' : ''}" id="capWrap"><label for="cap">${T('captcha')}</label>
         <div class="captcha"><div class="captcha-img" id="capBox"></div><button class="iconbtn" data-act="captcha" aria-label="${T('captcha_refresh')}">${ic('refresh', 20)}</button></div>
         <input class="input" id="cap" autocomplete="off" placeholder="${T('captcha_ph')}" autocapitalize="off"></div>
       <button class="btn block" id="checkBtn" data-act="check" ${ready ? '' : 'disabled'}>${T('check')}</button>
@@ -101,6 +111,17 @@ function vCheck(p) {
     </div>
   </main>
   <div id="ctaWrap">${c.option ? `<div class="sticky-cta"><div class="in"><a class="btn" href="#/point">${T('next_point')}</a></div></div>` : ''}</div>`;
+}
+/** Пропуск капчи на 15 минут после успешной проверки — только для того же ИИН */
+const PASS_KEY = 'gm_cap_pass';
+function getPass() { try { const p = JSON.parse(sessionStorage.getItem(PASS_KEY) || 'null'); return p && p.exp > Date.now() ? p : null; } catch { return null; } }
+function setPass(iin, token) { try { if (token) sessionStorage.setItem(PASS_KEY, JSON.stringify({ iin, token, exp: Date.now() + 14 * 60000 })); else sessionStorage.removeItem(PASS_KEY); } catch { /* приватный режим */ } }
+const hasPass = () => { const p = getPass(); return !!p && p.iin === S.co?.iin; };
+function syncCaptcha() {
+  const w = $('#capWrap'); if (!w) return;
+  const hide = hasPass();
+  w.classList.toggle('hide', hide);
+  if (!hide && !$('#capBox').dataset.id) loadCaptcha('#capBox', '#cap').catch(handleError);
 }
 function refreshCheckBtn() { const b = $('#checkBtn'); if (b) b.disabled = !(S.co.iin.length === 12 && S.co.tu6.length === 6); }
 
@@ -158,7 +179,7 @@ function vOrder(o, token) {
       ${['pending', 'paid'].includes(o.status) ? `<div class="qrbox"><img src="/api/orders/${o.num}/qr.svg?t=${tk}" width="200" height="200" alt="${T('qr_alt', { num: o.num })}"></div>
       <p class="muted sm" style="margin-top:10px">${pending ? T('qr_pay') : T('qr_take')}</p>` : ''}
       ${pending ? `<div class="countdown">${ic('clock', 18)}<span>${T('pay_within', { t: `<span data-deadline="${esc(o.expiresAt)}">--:--</span>` })}</span></div>` : ''}
-      ${o.status === 'cancelled' ? `<div style="text-align:left">${msgBox('err', T('cancelled_h'), T('cancelled_t'))}</div>` : ''}
+      ${o.status === 'cancelled' ? `<div style="text-align:left">${msgBox('err', T('cancelled_h'), T({ buyer: 'cancelled_buyer_t', seller: 'cancelled_seller_t' }[o.cancelSource] || 'cancelled_t'))}</div>` : ''}
       ${o.status === 'issued' ? `<div style="text-align:left">${msgBox('ok', T('issued_h'), T('issued_t'))}</div>` : ''}
       ${o.status === 'returned' ? `<div style="text-align:left">${msgBox('info', T('returned_h'), '')}</div>` : ''}
     </div>
@@ -171,7 +192,8 @@ function vOrder(o, token) {
       <li><span>${pending ? T('seq1_pending') : T('seq1')}</span></li>
       <li><span>${T('seq2')}</span></li>
       <li><span>${T('seq3')}</span></li></ol></div>
-    <div class="btn-row" style="margin-top:16px"><a class="btn" href="/api/orders/${o.num}/pdf?t=${tk}&lang=${LANG}" download>${ic('download', 20)}${T('pdf')}</a><a class="btn sec" href="#/">${T('to_catalog')}</a></div>`
+    <div class="btn-row" style="margin-top:16px"><a class="btn" href="/api/orders/${o.num}/pdf?t=${tk}&lang=${LANG}" download>${ic('download', 20)}${T('pdf')}</a><a class="btn sec" href="#/">${T('to_catalog')}</a></div>
+    ${pending ? `<button class="btn ghost block" style="margin-top:8px;color:var(--danger)" data-act="cancelOrder">${ic('x', 18)}${T('cancel_order')}</button>` : ''}`
     : `<a class="btn sec block" style="margin-top:16px" href="#/">${T('to_catalog')}</a>`}
   </main>`;
 }
@@ -192,7 +214,7 @@ async function route() {
     else if (h[0] === 'buy' && prod(h[1])) {
       if (!S.co || S.co.productId !== Number(h[1])) S.co = { productId: Number(h[1]), iin: '', tu6: '', options: null, option: null, region: '', pointId: null, error: null };
       render(vCheck(prod(h[1])));
-      loadCaptcha('#capBox', '#cap').catch(handleError);
+      syncCaptcha();
     } else if (h[0] === 'point' && S.co?.option) {
       S.points = await GET(`/api/points?productId=${S.co.productId}`);
       if (S.co.pointId && !S.points.points.some(x => x.id === S.co.pointId)) S.co.pointId = null;
@@ -204,6 +226,7 @@ async function route() {
   }
 }
 async function showOrder(num, token) {
+  S.orderToken = token;
   const load = async first => {
     const o = await GET(`/api/orders/${num}?t=${encodeURIComponent(token)}`);
     setServerNow(o.now);
@@ -232,15 +255,18 @@ bindEvents({
   captcha() { return loadCaptcha('#capBox', '#cap'); },
   async check(t) {
     const c = S.co;
+    const pass = hasPass() ? getPass().token : null;
     const captchaText = $('#cap').value.trim();
-    if (!captchaText) { toast(T('enter_captcha')); $('#cap').focus(); return; }
+    if (!pass && !captchaText) { toast(T('enter_captcha')); $('#cap').focus(); return; }
     c.error = null; c.options = null; c.option = null;
     await busy(t, async () => {
       try {
-        const r = await POST('/api/check', { iin: c.iin, tu6: c.tu6, captchaId: $('#capBox').dataset.id, captchaText });
+        const r = await POST('/api/check', { iin: c.iin, tu6: c.tu6, captchaPass: pass, captchaId: $('#capBox').dataset.id, captchaText });
         c.options = r.options;
         if (r.options.length === 1) c.option = r.options[0];
+        setPass(c.iin, r.captchaPass);
       } catch (e) {
+        if (['not_found', 'locked', 'captcha'].includes(e.code)) setPass(null, null); // при ошибке капча снова нужна
         const left = e.data?.attemptsLeft;
         if (e.code === 'not_found') c.error = { title: T('nf_h'), text: T('nf_t') + (left != null ? T('attempts', { n: left }) : '') };
         else if (e.code === 'captcha') c.error = { title: T('captcha_h'), text: T('captcha_t') };
@@ -251,7 +277,19 @@ bindEvents({
     });
     $('#checkRes').innerHTML = checkResult();
     $('#ctaWrap').innerHTML = c.option ? `<div class="sticky-cta"><div class="in"><a class="btn" href="#/point">${T('next_point')}</a></div></div>` : '';
-    loadCaptcha('#capBox', '#cap').catch(() => {});
+    $('#capBox').dataset.id = '';
+    if (!hasPass()) loadCaptcha('#capBox', '#cap').catch(() => {});
+    syncCaptcha();
+  },
+  mfr(t) { S.mfr = t.dataset.v; render(vCatalog()); },
+  async cancelOrder(t) {
+    const o = S.order;
+    if (!confirm(T('cancel_confirm', { num: o.num }))) return;
+    await busy(t, async () => {
+      try { S.order = await POST(`/api/orders/${o.num}/cancel?t=${encodeURIComponent(S.orderToken)}`); toast(T('cancel_done')); }
+      catch (e) { toast(e.message); }
+      route();
+    });
   },
   pickTU(t) {
     S.co.option = S.co.options[Number(t.dataset.i)];
@@ -275,7 +313,7 @@ bindEvents({
   },
 }, {
   q(t) { S.q = t.value; const pos = t.selectionStart; render(vCatalog()); const n = $('#q'); n.focus(); n.setSelectionRange(pos, pos); },
-  iin(t) { const d = digits(t.value).slice(0, 12); S.co.iin = d; t.value = maskIIN(d); resetCheck(); refreshCheckBtn(); },
+  iin(t) { const d = digits(t.value).slice(0, 12); S.co.iin = d; t.value = maskIIN(d); resetCheck(); refreshCheckBtn(); syncCaptcha(); },
   tu6(t) { const d = digits(t.value).slice(0, 6); S.co.tu6 = d; t.value = d; resetCheck(); refreshCheckBtn(); },
 }, {
   region(t) { S.co.region = t.value; S.co.pointId = null; render(vPoint(prod(S.co.productId))); },

@@ -63,8 +63,10 @@ r.get('/me', async (req, res) => {
   const u = req.user;
   let point = null;
   if (u.point_id) point = (await q('SELECT id, region, address, hours FROM points WHERE id=$1', [u.point_id])).rows[0] || null;
+  let manufacturer = null;
+  if (u.manufacturer_id) manufacturer = (await q('SELECT id, name FROM manufacturers WHERE id=$1', [u.manufacturer_id])).rows[0] || null;
   res.set('Cache-Control', 'no-store').json({
-    id: u.id, role: u.role, fullName: u.full_name, login: u.login, point,
+    id: u.id, role: u.role, fullName: u.full_name, login: u.login, point, manufacturer,
     mustChangePassword: u.mustChange,
     passwordExpired: !u.must_change_password && u.mustChange,
   });

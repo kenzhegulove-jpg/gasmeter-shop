@@ -23,4 +23,20 @@ async function verifyCaptcha(id, text) {
   return !!row && row.valid && row.answer_hash === sha256(String(text).trim().toLowerCase());
 }
 
-module.exports = { createCaptcha, verifyCaptcha };
+/**
+ * Пропуск капчи: после успешной проверки ИИН + ТУ покупатель 15 минут не вводит капчу
+ * для того же ИИН. Пропуск удаляется при неудачной проверке.
+ */
+async function issueCaptchaPass(iin, minutes) {
+  const token = require('crypto').randomBytes(24).toString('base64url');
+  await q("INSERT INTO captcha_passes (token_hash, iin, expires_at) VALUES ($1, $2, now() + make_interval(mins => $3))", [sha256(token), iin, minutes]);
+  return token;
+}
+async function checkCaptchaPass(token, iin) {
+  if (!token || typeof token !== 'string' || token.length > 100) return false;
+  const r = await q('SELECT 1 FROM captcha_passes WHERE token_hash=$1 AND iin=$2 AND expires_at > now()', [sha256(token), iin]);
+  return r.rowCount > 0;
+}
+const dropCaptchaPass = token => (token && typeof token === 'string' ? q('DELETE FROM captcha_passes WHERE token_hash=$1', [sha256(token)]) : null);
+
+module.exports = { createCaptcha, verifyCaptcha, issueCaptchaPass, checkCaptchaPass, dropCaptchaPass };

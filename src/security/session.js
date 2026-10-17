@@ -29,7 +29,7 @@ async function loadUser(req, _res, next) {
       AND s.created_at > now() - make_interval(hours => $2)
       AND s.last_seen_at > now() - make_interval(mins => $3)
       AND NOT u.blocked
-    RETURNING u.id, u.role, u.full_name, u.login, u.point_id, u.must_change_password, u.password_changed_at`,
+    RETURNING u.id, u.role, u.full_name, u.login, u.point_id, u.manufacturer_id, u.must_change_password, u.password_changed_at`,
     [sha256(t), config.login.sessionHours, config.login.idleMin]);
   const u = r.rows[0];
   if (u) {

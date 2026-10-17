@@ -3,9 +3,9 @@ const express = require('express');
 const config = require('../config');
 const { q, tx } = require('../db');
 const { HttpError, bad, digits, isIIN, shortName, dear, randomToken, safeEqual, clientIp, fmtMinutes } = require('../util');
-const { createCaptcha, verifyCaptcha } = require('../security/captcha');
+const { createCaptcha, verifyCaptcha, issueCaptchaPass, checkCaptchaPass, dropCaptchaPass } = require('../security/captcha');
 const { lockedFor, registerFail, resetFails } = require('../security/locks');
-const { expirePending, getOrder, publicOrder, signTicket, verifyTicket } = require('../orders');
+const { expirePending, getOrder, publicOrder, signTicket, verifyTicket, cancelPending } = require('../orders');
 const { orderPdf, orderQrSvg } = require('../pdf');
 const { REGION_ORDER } = require('../regions');
 const { getSettings } = require('../settings');
@@ -15,10 +15,12 @@ const r = express.Router();
 
 r.get('/catalog', async (_req, res) => {
   const { rows } = await q(`
-    SELECT p.id, p.name, p.description, p.price, p.specs,
+    SELECT p.id, p.name, p.description, p.price, p.specs, p.manufacturer_id, m.name AS manufacturer_name,
            COALESCE(array_agg(ph.position ORDER BY ph.position) FILTER (WHERE ph.id IS NOT NULL), '{}') AS photos
     FROM products p LEFT JOIN product_photos ph ON ph.product_id = p.id
-    WHERE p.active GROUP BY p.id ORDER BY p.sort, p.id`);
+    LEFT JOIN manufacturers m ON m.id = p.manufacturer_id AND m.active
+    WHERE p.active GROUP BY p.id, m.name ORDER BY p.sort, p.id`);
+  rows.forEach(p => { if (!p.manufacturer_name) p.manufacturer_id = null; });
   const s = await getSettings();
   if (s.stockEnabled) {
     await expirePending();
@@ -67,13 +69,17 @@ r.post('/check', async (req, res) => {
   if (tu6.length !== 6) throw bad('Введите последние 6 цифр номера ТУ', 'tu6_format');
   const iinLock = await lockedFor('check_iin', iin);
   if (iinLock) throw lockMsg(iinLock);
-  if (!(await verifyCaptcha(req.body?.captchaId, req.body?.captchaText))) throw bad('Неверный код с картинки. Введите новый код.', 'captcha');
+  // Капча не нужна, если есть действующий пропуск для этого ИИН (выдается после успешной проверки)
+  const pass = req.body?.captchaPass;
+  const passOk = await checkCaptchaPass(pass, iin);
+  if (!passOk && !(await verifyCaptcha(req.body?.captchaId, req.body?.captchaText))) throw bad('Неверный код с картинки. Введите новый код.', 'captcha');
 
   const { rows } = await q('SELECT tu_number, owner_name, address, is_legal, gas_flow FROM tu_records WHERE iin=$1 AND tu_last6=$2', [iin, tu6]);
   if (!rows.length) {
     const f1 = await registerFail('check_iin', iin, C.iinMaxFails, C.lockMin);
     await registerFail('check_ip', ip, C.ipMaxFails, C.lockMin);
     await q('INSERT INTO check_log (iin, ip, result) VALUES ($1,$2,$3)', [iin, ip, f1.locked ? 'fail_locked' : 'fail']);
+    if (passOk) await dropCaptchaPass(pass);
     if (f1.locked) throw lockMsg(C.lockMin);
     throw new HttpError(404, NOT_FOUND_MSG, 'not_found', { attemptsLeft: f1.left });
   }
@@ -97,7 +103,7 @@ r.post('/check', async (req, res) => {
     if (reason === 'gas') throw new HttpError(403, 'Для объекта с таким расходом газа бытовой счетчик не подходит. Обратитесь в газовую компанию.', 'gas');
     throw new HttpError(409, 'На данное ТУ уже приобретен счетчик. По одному ТУ можно купить только один счетчик.', 'already_bought');
   }
-  res.json({ options });
+  res.json({ options, captchaPass: passOk ? pass : await issueCaptchaPass(iin, C.captchaPassMin) });
 });
 
 /** Оформление заказа по билету проверки */
@@ -140,6 +146,12 @@ async function orderByToken(req) {
 }
 
 r.get('/orders/:num', async (req, res) => { res.set('Cache-Control', 'no-store').json(publicOrder(await orderByToken(req))); });
+/** Отмена неоплаченного заказа покупателем (по секретной ссылке заказа) */
+r.post('/orders/:num/cancel', async (req, res) => {
+  const o = await orderByToken(req);
+  if (!(await cancelPending(o.num, 'buyer'))) throw new HttpError(409, 'Отменить можно только заказ, ожидающий оплаты.', 'cancel_status');
+  res.json(publicOrder(await getOrder(o.num)));
+});
 r.get('/orders/:num/qr.svg', async (req, res) => { res.set('Content-Type', 'image/svg+xml').set('Cache-Control', 'no-store').send(await orderQrSvg(await orderByToken(req))); });
 r.get('/orders/:num/pdf', async (req, res) => {
   const o = await orderByToken(req);

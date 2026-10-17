@@ -1,15 +1,27 @@
 /* Кабинет администратора */
 'use strict';
-const ATABS = [['reports', 'Отчеты', 'chart'], ['sales', 'Реестр продаж', 'doc'], ['stock', 'Остатки', 'box'], ['points', 'Точки продаж', 'store'], ['sellers', 'Сотрудники', 'users'], ['products', 'Товары', 'box'], ['tu', 'База ТУ', 'db'], ['audit', 'Журнал', 'doc'], ['settings', 'Настройки', 'key'], ['profile', 'Профиль', 'user']];
+const ATABS = [['reports', 'Отчеты', 'chart'], ['sales', 'Реестр продаж', 'doc'], ['stock', 'Остатки', 'box'], ['points', 'Точки продаж', 'store'], ['sellers', 'Сотрудники', 'users'], ['products', 'Товары', 'box'], ['mfrs', 'Производители', 'store'], ['tu', 'База ТУ', 'db'], ['audit', 'Журнал', 'doc'], ['settings', 'Настройки', 'key'], ['profile', 'Профиль', 'user']];
 const ACTIONS = {
   login: 'Вход', login_locked: 'Блокировка входа', change_credentials: 'Смена логина/пароля', order_paid: 'Подтверждена оплата', order_issued: 'Выдан счетчик',
   order_returned: 'Возврат', point_create: 'Создана точка', point_update: 'Изменена точка', seller_create: 'Создан сотрудник', seller_update: 'Изменен сотрудник',
-  seller_block: 'Сотрудник заблокирован', seller_unblock: 'Сотрудник разблокирован', seller_reset_password: 'Сброс пароля сотрудника', receipt_replaced: 'Заменено фото чека', product_create: 'Создан товар',
+  seller_block: 'Сотрудник заблокирован', seller_unblock: 'Сотрудник разблокирован', seller_reset_password: 'Сброс пароля сотрудника', receipt_replaced: 'Заменено фото чека', order_cancelled: 'Заказ отменен продавцом', manufacturer_create: 'Создан производитель', manufacturer_update: 'Изменен производитель', product_create: 'Создан товар',
   product_update: 'Изменен товар', settings_update: 'Изменены настройки', stock_receipt: 'Приход товара', stock_correction: 'Корректировка остатка', sales_export: 'Выгрузка реестра продаж', product_photo_add: 'Добавлено фото', product_photo_delete: 'Удалено фото', tu_import: 'Загрузка базы ТУ', report_export: 'Выгрузка отчета',
 };
 // Финансисту доступны только отчеты (просмотр и выгрузка) и свой профиль
 const FINANCE_TABS = ['reports', 'sales', 'stock', 'profile'];
-const isFinance = () => Staff.me?.role === 'finance';
+const isMfr = () => Staff.me?.role === 'manufacturer';
+// Финансист и менеджер производителя — только просмотр отчетов (у менеджера — по своему производителю)
+const isFinance = () => Staff.me?.role === 'finance' || isMfr();
+const API = () => (isMfr() ? '/api/mfr' : '/api/admin');
+const ROLE_LABEL = { seller: 'Продавец', finance: 'Финансист', manufacturer: 'Менеджер производителя' };
+const REL = { spouse: 'супруг(а)', parent: 'родитель', child: 'ребенок', sibling: 'брат/сестра' };
+/** Получатель в реестре продаж: владелец / представитель / родственник + ссылки на фото документа */
+function recipientCell(o) {
+  const docs = Array.from({ length: o.recipient_docs || 0 }, (_, i) => `<a href="/api/receipts/docs/${o.num}/${i}" target="_blank" rel="noopener" style="color:var(--brand-ink)">док.${o.recipient_docs > 1 ? ' ' + (i + 1) : ''}</a>`).join(' ');
+  if (o.recipient === 'proxy') return `Представитель<div class="muted">${o.proxy_number ? `дов. № ${esc(o.proxy_number)}` : ''}${o.proxy_iin ? ` ИИН ${maskIIN(o.proxy_iin)}` : ''}</div>${docs}`;
+  if (o.recipient === 'relative') return `Родственник: ${REL[o.relation] || ''}<div class="muted">${o.proxy_iin ? `ИИН ${maskIIN(o.proxy_iin)}` : ''}</div>${docs}`;
+  return 'Владелец';
+}
 const today = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Almaty' });
 const daysAgo = n => new Date(Date.now() - n * 86400000).toLocaleDateString('sv-SE', { timeZone: 'Asia/Almaty' });
 
@@ -20,14 +32,14 @@ const Admin = {
   async start() { this.tab = 'reports'; await this.show(); },
 
   shell(title, actions, content) {
-    return `<div class="admin"><aside class="side">${logoStaff(isFinance() ? 'Финансист' : 'Администратор')}
+    return `<div class="admin"><aside class="side">${logoStaff(isMfr() ? (Staff.me.manufacturer?.name || 'Производитель') : isFinance() ? 'Финансист' : 'Администратор')}
       ${ATABS.filter(([k]) => !isFinance() || FINANCE_TABS.includes(k)).map(([k, l, i]) => `<button class="nav ${this.tab === k ? 'on' : ''}" data-act="aTab" data-t="${k}">${ic(i, 20)}${l}</button>`).join('')}
       <div class="spacer"></div><button class="nav" data-act="logout">${ic('logout', 20)}Выйти</button></aside>
       <main class="amain"><div class="ahead"><h1>${title}</h1><div class="btn-row">${actions || ''}</div></div>${content}</main></div>`;
   },
   async show() {
     await guard(async () => {
-      const v = { reports: this.vReports, sales: this.vSales, stock: this.vStock, settings: this.vSettings, points: this.vPoints, sellers: this.vSellers, products: this.vProducts, tu: this.vTU, audit: this.vAudit, profile: this.vProfile }[this.tab];
+      const v = { reports: this.vReports, sales: this.vSales, stock: this.vStock, settings: this.vSettings, points: this.vPoints, sellers: this.vSellers, products: this.vProducts, mfrs: this.vMfrs, tu: this.vTU, audit: this.vAudit, profile: this.vProfile }[this.tab];
       render(await v.call(this));
     });
   },
@@ -36,10 +48,10 @@ const Admin = {
 
   /* ----- Отчеты ----- */
   async vReports() {
-    const r = await GET(`/api/admin/reports/summary?from=${this.from}&to=${this.to}`);
+    const r = await GET(`${API()}/reports/summary?from=${this.from}&to=${this.to}`);
     const k = r.kpi, max = Math.max(1, ...r.byPoint.map(x => x.issued));
     return this.shell('Отчеты', `<div class="date-range"><input type="date" data-ch="aFrom" value="${this.from}" max="${today()}" aria-label="С"><span class="muted">—</span><input type="date" data-ch="aTo" value="${this.to}" max="${today()}" aria-label="По"></div>
-      <a class="btn sm sec" href="/api/admin/reports/export.xlsx?from=${this.from}&to=${this.to}">${ic('download', 18)}Выгрузить в Excel</a>`, `
+      ${isMfr() ? `<a class="btn sm sec" href="/api/mfr/sales/export.xlsx?from=${this.from}&to=${this.to}">${ic('download', 18)}Реестр в Excel</a>` : `<a class="btn sm sec" href="/api/admin/reports/export.xlsx?from=${this.from}&to=${this.to}">${ic('download', 18)}Выгрузить в Excel</a>`}`, `
       <div class="kpis">
         <div class="kpi"><span>Заказов оформлено</span><b>${k.total}</b></div>
         <div class="kpi"><span>Счетчиков выдано</span><b>${k.issued}</b></div>
@@ -47,6 +59,10 @@ const Admin = {
         <div class="kpi"><span>Возвратов</span><b>${k.returned}</b></div>
         <div class="kpi"><span>Отменено без оплаты</span><b>${k.cancelled}</b></div>
         <div class="kpi"><span>Выручка, ₸</span><b>${fmt(k.revenue)}</b></div></div>
+      ${r.byProduct ? `<h2 class="h3" style="margin-top:8px">Продажи и возвраты по моделям</h2>
+      <div class="table-wrap" style="margin-bottom:16px"><table><thead><tr><th>Модель</th><th class="num">Выдано</th><th class="num">Возвратов</th><th class="num">Сумма, ₸</th></tr></thead><tbody>
+        ${r.byProduct.map(x => `<tr><td>${esc(x.product_name)}</td><td class="num">${x.issued}</td><td class="num">${x.returned}</td><td class="num">${fmt(x.revenue)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">За выбранный период продаж нет</td></tr>'}
+      </tbody></table></div>` : ''}
       <h2 class="h3" style="margin-top:8px">Продажи по точкам</h2>
       <div class="table-wrap"><table><thead><tr><th>Точка продаж</th><th class="num">Заказов</th><th>Выдано</th><th class="num">Возвратов</th><th class="num">Выручка, ₸</th></tr></thead><tbody>
         ${r.byPoint.map(x => `<tr><td><b style="font-weight:600">${esc(x.region)}</b><div class="muted sm">${esc(x.address)}</div></td><td class="num">${x.total}</td><td><div style="display:flex;align-items:center;gap:10px"><div class="bar" style="flex:1"><i style="width:${x.issued / max * 100}%"></i></div><span>${x.issued}</span></div></td><td class="num">${x.returned}</td><td class="num">${fmt(x.revenue)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">За выбранный период заказов нет</td></tr>'}
@@ -61,29 +77,30 @@ const Admin = {
   async vSales() {
     const f = this.sf;
     const qs = `from=${f.from}&to=${f.to}&pointId=${f.pointId}&status=${f.status}&q=${encodeURIComponent(f.q)}`;
-    const [r, points] = await Promise.all([GET(`/api/admin/sales?${qs}&page=${f.page}`), GET('/api/admin/points')]);
+    const [r, points] = await Promise.all([GET(`${API()}/sales?${qs}&page=${f.page}`), GET(`${API()}/points`)]);
+    const anon = isMfr();
     const t = r.totals, pages = Math.ceil(t.count / r.pageSize);
-    return this.shell('Реестр продаж', `<a class="btn sm sec" href="/api/admin/sales/export.xlsx?${qs}">${ic('download', 18)}Выгрузить в Excel</a>`, `
+    return this.shell(anon ? 'Реестр по серийным номерам' : 'Реестр продаж', `<a class="btn sm sec" href="${API()}/sales/export.xlsx?${qs}">${ic('download', 18)}Выгрузить в Excel</a>`, `
       <div class="toolbar">
         <div class="date-range"><input type="date" data-ch="aSf" data-k="from" value="${f.from}" max="${today()}" aria-label="С"><span class="muted">—</span><input type="date" data-ch="aSf" data-k="to" value="${f.to}" max="${today()}" aria-label="По"></div>
         <select class="input" data-ch="aSf" data-k="pointId" style="height:44px;width:auto;max-width:320px;font-size:14px"><option value="">Все точки</option>${points.map(p => `<option value="${p.id}" ${String(p.id) === String(f.pointId) ? 'selected' : ''}>${esc(p.region)}, ${esc(p.address)}</option>`).join('')}</select>
         <div class="chipset">${[['all', 'Все'], ['issued', 'Выданы'], ['returned', 'Возвраты']].map(([k, l]) => `<button class="${f.status === k ? 'on' : ''}" data-act="aSfStatus" data-v="${k}">${l}</button>`).join('')}</div>
       </div>
-      <div class="toolbar"><label class="search">${ic('search', 18)}<input id="sfq" placeholder="ИИН, № ТУ, серийный №, ФИО" value="${esc(f.q)}" aria-label="Поиск"></label><button class="btn sm" data-act="aSfSearch">Найти</button></div>
+      <div class="toolbar"><label class="search">${ic('search', 18)}<input id="sfq" placeholder="${anon ? '№ ТУ, серийный №, № заказа' : 'ИИН, № ТУ, серийный №, ФИО'}" value="${esc(f.q)}" aria-label="Поиск"></label><button class="btn sm" data-act="aSfSearch">Найти</button></div>
       <div class="kpis"><div class="kpi"><span>Выдано, шт.</span><b>${t.issued}</b></div><div class="kpi"><span>Сумма выданных, ₸</span><b>${fmt(t.revenue)}</b></div><div class="kpi"><span>Возвратов</span><b>${t.returned}</b></div></div>
-      <div class="table-wrap"><table><thead><tr><th>Дата выдачи</th><th>№ заказа</th><th>Товар</th><th>Серийный №</th><th>Владелец ТУ</th><th>Номер ТУ</th><th>Точка</th><th>Продавец</th><th>Получатель</th><th>Чек</th><th>Статус</th></tr></thead><tbody>
+      <div class="table-wrap"><table><thead><tr><th>Дата выдачи</th><th>№ заказа</th><th>Товар</th><th>Серийный №</th>${anon ? '' : '<th>Владелец ТУ</th>'}<th>Номер ТУ</th><th>Точка</th>${anon ? '' : '<th>Продавец</th><th>Получатель</th><th>Чек</th>'}<th>Статус</th></tr></thead><tbody>
         ${r.rows.map(o => `<tr><td style="white-space:nowrap">${fmtDT(o.issued_at)}</td><td>${o.num}</td><td>${esc(o.product_name)}</td><td style="white-space:nowrap">${esc(o.serial_number || '')}</td>
-          <td>${esc(o.owner_name)}<div class="muted sm">${maskIIN(o.iin)}</div></td><td style="white-space:nowrap">${esc(o.tu_number)}</td><td>${esc(o.point_region)}<div class="muted sm">${esc(o.point_address)}</div></td>
-          <td>${esc(o.seller_name || '')}</td><td class="sm">${o.recipient === 'proxy' ? `Представитель<div class="muted">дов. № ${esc(o.proxy_number || '')}</div>` : 'Владелец'}</td>
-          <td class="sm">${o.has_receipt_photo ? `<a href="/api/receipts/${o.num}" target="_blank" rel="noopener" style="color:var(--brand-ink)">фото</a>` : esc(o.receipt_number || '—')}</td>
-          <td>${pill(o.status)}${o.status === 'returned' ? `<div class="muted sm">${fmtDate(o.returned_at)}${o.return_to_stock ? ', в остаток' : ''}</div>` : ''}</td></tr>`).join('') || '<tr><td colspan="11" class="muted">За выбранный период выдач нет</td></tr>'}
+          ${anon ? '' : `<td>${esc(o.owner_name)}<div class="muted sm">${maskIIN(o.iin)}</div></td>`}<td style="white-space:nowrap">${esc(o.tu_number)}</td><td>${esc(o.point_region)}<div class="muted sm">${esc(o.point_address)}</div></td>
+          ${anon ? '' : `<td>${esc(o.seller_name || '')}</td><td class="sm">${recipientCell(o)}</td>
+          <td class="sm">${o.has_receipt_photo ? `<a href="/api/receipts/${o.num}" target="_blank" rel="noopener" style="color:var(--brand-ink)">фото</a>` : esc(o.receipt_number || '—')}</td>`}
+          <td>${pill(o.status)}${o.status === 'returned' ? `<div class="muted sm">${fmtDate(o.returned_at)}${o.return_to_stock ? ', в остаток' : ''}</div>` : ''}</td></tr>`).join('') || `<tr><td colspan="${anon ? 7 : 11}" class="muted">За выбранный период выдач нет</td></tr>`}
       </tbody></table>
       ${pages > 1 ? `<div class="pager"><span class="muted sm">${f.page * r.pageSize + 1}–${Math.min(t.count, (f.page + 1) * r.pageSize)} из ${t.count}</span><button class="btn sm line" data-act="aSfPage" data-d="-1" ${f.page ? '' : 'disabled'}>${ic('back', 16)}</button><button class="btn sm line" data-act="aSfPage" data-d="1" ${f.page + 1 < pages ? '' : 'disabled'}>${ic('chev', 16)}</button></div>` : ''}</div>`);
   },
 
   /* ----- Остатки ----- */
   async vStock() {
-    const [d, moves] = await Promise.all([GET('/api/admin/stock'), GET(`/api/admin/stock/moves${this.movesPoint ? `?pointId=${this.movesPoint}` : ''}`)]);
+    const [d, moves] = await Promise.all([GET(`${API()}/stock`), GET(`${API()}/stock/moves${this.movesPoint ? `?pointId=${this.movesPoint}` : ''}`)]);
     this.stockData = d;
     const cell = (pt, pr) => d.cells.find(c => c.point_id === pt && c.product_id === pr) || { on_hand: 0, reserved: 0, available: 0 };
     const thr = d.settings.lowStockThreshold;
@@ -96,9 +113,9 @@ const Admin = {
       </tbody></table></div>
       <div class="section-title" style="margin-top:22px"><h2 class="h3">Движение товара</h2>
         <select class="input" data-ch="aMovesPoint" style="height:40px;width:auto;max-width:320px;font-size:14px"><option value="">Все точки</option>${d.points.map(p => `<option value="${p.id}" ${String(p.id) === String(this.movesPoint) ? 'selected' : ''}>${esc(p.region)}, ${esc(p.address)}</option>`).join('')}</select></div>
-      <div class="table-wrap"><table><thead><tr><th>Дата</th><th>Точка</th><th>Товар</th><th>Операция</th><th class="num">Изменение</th><th class="num">Остаток</th><th>Заказ</th><th>Кто</th><th>Комментарий</th></tr></thead><tbody>
+      <div class="table-wrap"><table><thead><tr><th>Дата</th><th>Точка</th><th>Товар</th><th>Операция</th><th class="num">Изменение</th><th class="num">Остаток</th><th>Заказ</th>${isMfr() ? '' : '<th>Кто</th><th>Комментарий</th>'}</tr></thead><tbody>
         ${moves.map(m => `<tr><td style="white-space:nowrap">${fmtDT(m.created_at)}</td><td class="sm">${esc(m.point_region)}<div class="muted">${esc(m.point_address)}</div></td><td>${esc(m.product_name)}</td><td>${REASONS[m.reason]}</td>
-          <td class="num" style="color:${m.delta > 0 ? 'var(--ok)' : 'var(--danger)'}">${m.delta > 0 ? '+' : ''}${m.delta}</td><td class="num">${m.balance}</td><td>${m.order_num || ''}</td><td class="sm">${esc(m.user_name || '')}</td><td class="sm">${esc(m.comment || '')}</td></tr>`).join('') || '<tr><td colspan="9" class="muted">Движений пока нет</td></tr>'}
+          <td class="num" style="color:${m.delta > 0 ? 'var(--ok)' : 'var(--danger)'}">${m.delta > 0 ? '+' : ''}${m.delta}</td><td class="num">${m.balance}</td><td>${m.order_num || ''}</td>${isMfr() ? '' : `<td class="sm">${esc(m.user_name || '')}</td><td class="sm">${esc(m.comment || '')}</td>`}</tr>`).join('') || `<tr><td colspan="${isMfr() ? 7 : 9}" class="muted">Движений пока нет</td></tr>`}
       </tbody></table></div>`);
   },
   stockModal(op) {
@@ -161,10 +178,10 @@ const Admin = {
 
   /* ----- Продавцы ----- */
   async vSellers() {
-    [this.sellers, this.points] = await Promise.all([GET('/api/admin/sellers'), GET('/api/admin/points')]);
+    [this.sellers, this.points, this.mfrs] = await Promise.all([GET('/api/admin/sellers'), GET('/api/admin/points'), GET('/api/admin/manufacturers')]);
     return this.shell('Сотрудники', `<button class="btn sm" data-act="aSellerEdit" data-id="">${ic('plus', 18)}Добавить сотрудника</button>`, `
-      <div class="table-wrap"><table><thead><tr><th>ФИО</th><th>Роль</th><th>Логин</th><th>Точка продаж</th><th>Последний вход</th><th>Статус</th><th></th></tr></thead><tbody>
-      ${this.sellers.map(s => `<tr><td><b style="font-weight:600">${esc(s.full_name)}</b></td><td>${s.role === 'finance' ? 'Финансист' : 'Продавец'}</td><td>${esc(s.login)}</td><td>${s.role === 'finance' ? '<span class="muted">—</span>' : `${esc(s.point_region || '')}<div class="muted sm">${esc(s.point_address || '')}</div>`}</td><td style="white-space:nowrap">${s.last_login_at ? fmtDT(s.last_login_at) : '<span class="muted">не входил</span>'}</td>
+      <div class="table-wrap"><table><thead><tr><th>ФИО</th><th>Роль</th><th>Логин</th><th>Точка / производитель</th><th>Последний вход</th><th>Статус</th><th></th></tr></thead><tbody>
+      ${this.sellers.map(s => `<tr><td><b style="font-weight:600">${esc(s.full_name)}</b></td><td>${ROLE_LABEL[s.role] || s.role}</td><td>${esc(s.login)}</td><td>${s.role === 'seller' ? `${esc(s.point_region || '')}<div class="muted sm">${esc(s.point_address || '')}</div>` : s.role === 'manufacturer' ? esc(s.manufacturer_name || '') : '<span class="muted">—</span>'}</td><td style="white-space:nowrap">${s.last_login_at ? fmtDT(s.last_login_at) : '<span class="muted">не входил</span>'}</td>
         <td>${s.blocked ? '<span class="pill blocked">Заблокирован</span>' : s.locked ? '<span class="pill pending">Вход заблокирован на 60 мин</span>' : s.must_change_password ? '<span class="pill pending">Ждет смены пароля</span>' : '<span class="pill active">Активен</span>'}</td>
         <td><div class="td-actions"><button class="btn sm line" data-act="aSellerEdit" data-id="${s.id}" aria-label="Изменить" title="Изменить">${ic('edit', 16)}</button>
           <button class="btn sm line" data-act="aSellerReset" data-id="${s.id}" title="Сбросить пароль">${ic('key', 16)}</button>
@@ -174,10 +191,12 @@ const Admin = {
   sellerModal(id) {
     const s = this.sellers.find(x => x.id === Number(id)) || { role: 'seller', full_name: '', login: '', point_id: null };
     openModal(`<div class="sheet-head"><h2>${id ? 'Изменить сотрудника' : 'Новый сотрудник'}</h2><button class="iconbtn" data-act="closeModal" aria-label="Закрыть">${ic('x', 22)}</button></div>
-      <div class="field"><label for="srole">Роль</label><select class="input" id="srole" data-ch="aRole"><option value="seller" ${s.role === 'seller' ? 'selected' : ''}>Продавец — выдача счетчиков на точке</option><option value="finance" ${s.role === 'finance' ? 'selected' : ''}>Финансист — только просмотр и выгрузка отчетов</option></select></div>
+      <div class="field"><label for="srole">Роль</label><select class="input" id="srole" data-ch="aRole"><option value="seller" ${s.role === 'seller' ? 'selected' : ''}>Продавец — выдача счетчиков на точке</option><option value="finance" ${s.role === 'finance' ? 'selected' : ''}>Финансист — только просмотр и выгрузка отчетов</option><option value="manufacturer" ${s.role === 'manufacturer' ? 'selected' : ''}>Менеджер производителя — отчеты по своему производителю</option></select></div>
       <div class="field"><label for="sf">ФИО</label><input class="input" id="sf" value="${esc(s.full_name)}" maxlength="200"></div>
       <div class="field"><label for="sl">Логин</label><input class="input" id="sl" value="${esc(s.login)}" autocomplete="off" autocapitalize="off" maxlength="32"><span class="muted sm">3–32 символа: латинские буквы, цифры, точка, дефис, подчеркивание</span></div>
-      <div class="field ${s.role === 'finance' ? 'hide' : ''}" id="sptWrap"><label for="spt">Точка продаж</label><select class="input" id="spt"><option value="">Выберите точку</option>${this.points.filter(p => p.active).map(p => `<option value="${p.id}" ${s.point_id === p.id ? 'selected' : ''}>${esc(p.region)}, ${esc(p.address)}</option>`).join('')}</select></div>
+      <div class="field ${s.role === 'manufacturer' ? '' : 'hide'}" id="smfWrap"><label for="smf">Производитель</label><select class="input" id="smf"><option value="">Выберите производителя</option>${(this.mfrs || []).filter(m => m.active).map(m => `<option value="${m.id}" ${s.manufacturer_id === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
+        <span class="muted sm">Менеджер видит только обезличенные данные по товарам этого производителя: без ФИО, ИИН и адресов.</span></div>
+      <div class="field ${s.role === 'seller' ? '' : 'hide'}" id="sptWrap"><label for="spt">Точка продаж</label><select class="input" id="spt"><option value="">Выберите точку</option>${this.points.filter(p => p.active).map(p => `<option value="${p.id}" ${s.point_id === p.id ? 'selected' : ''}>${esc(p.region)}, ${esc(p.address)}</option>`).join('')}</select></div>
       ${id ? '' : msgBox('info', '', 'Система создаст временный пароль. Сотрудник сменит его при первом входе на собственный, соответствующий требованиям к паролю.') + '<div style="height:14px"></div>'}
       <div id="merr"></div><button class="btn block" data-act="aSellerSave" data-id="${id || ''}">Сохранить</button>`);
   },
@@ -185,17 +204,36 @@ const Admin = {
     openModal(`<div class="sheet-head"><h2>${esc(title)}</h2><button class="iconbtn" data-act="closeModal" aria-label="Закрыть">${ic('x', 22)}</button></div>
       <p>Логин: <b>${esc(login)}</b>. Временный пароль:</p>
       <div class="temp-pass">${esc(pass)}</div>
-      ${msgBox('warn', 'Пароль показывается один раз', 'Передайте его продавцу лично. При первом входе система потребует задать новый пароль.')}
+      ${msgBox('warn', 'Пароль показывается один раз', 'Передайте его сотруднику лично. При первом входе система потребует задать новый пароль.')}
       <button class="btn block" style="margin-top:16px" data-act="closeModal">Готово</button>`);
+  },
+
+  /* ----- Производители ----- */
+  async vMfrs() {
+    this.mfrs = await GET('/api/admin/manufacturers');
+    return this.shell('Производители', `<button class="btn sm" data-act="aMfrEdit" data-id="">${ic('plus', 18)}Добавить производителя</button>`, `
+      <p class="muted sm" style="margin-bottom:12px">Привяжите каждый товар к производителю в разделе «Товары». Менеджеров производителя создайте в разделе «Сотрудники».</p>
+      <div class="table-wrap"><table><thead><tr><th>Производитель</th><th>БИН</th><th class="num">Товаров</th><th class="num">Менеджеров</th><th>Статус</th><th></th></tr></thead><tbody>
+      ${this.mfrs.map(m => `<tr><td><b style="font-weight:600">${esc(m.name)}</b></td><td>${esc(m.bin || '—')}</td><td class="num">${m.products}</td><td class="num">${m.managers}</td><td>${m.active ? '<span class="pill active">Действует</span>' : '<span class="pill free">Отключен</span>'}</td>
+        <td><div class="td-actions"><button class="btn sm line" data-act="aMfrEdit" data-id="${m.id}">${ic('edit', 16)}Изменить</button></div></td></tr>`).join('') || '<tr><td colspan="6" class="muted">Добавьте первого производителя</td></tr>'}
+      </tbody></table></div>`);
+  },
+  mfrModal(id) {
+    const m = this.mfrs.find(x => x.id === Number(id)) || { name: '', bin: '', active: true };
+    openModal(`<div class="sheet-head"><h2>${id ? 'Изменить производителя' : 'Новый производитель'}</h2><button class="iconbtn" data-act="closeModal" aria-label="Закрыть">${ic('x', 22)}</button></div>
+      <div class="field"><label for="mn">Название</label><input class="input" id="mn" value="${esc(m.name)}" maxlength="200"></div>
+      <div class="field"><label for="mb">БИН</label><input class="input" id="mb" value="${esc(m.bin || '')}" inputmode="numeric" maxlength="12" placeholder="12 цифр"></div>
+      <label class="switch" style="margin-bottom:18px"><input type="checkbox" id="mact2" ${m.active ? 'checked' : ''}><span>Действует<div class="muted sm">Отключенный производитель скрыт из фильтра каталога, его менеджеры не могут войти.</div></span></label>
+      <div id="merr"></div><button class="btn block" data-act="aMfrSave" data-id="${id || ''}">Сохранить</button>`);
   },
 
   /* ----- Товары ----- */
   async vProducts() {
-    this.products = await GET('/api/admin/products');
+    [this.products, this.mfrs] = await Promise.all([GET('/api/admin/products'), GET('/api/admin/manufacturers')]);
     return this.shell('Товарные карточки', `<button class="btn sm" data-act="aProdEdit" data-id="">${ic('plus', 18)}Добавить товар</button>`, `
       <div class="agrid">${this.products.map(p => `<div class="acard"><div class="pimg">${productImg(p)}</div><div class="pbody"><b style="font-weight:600">${esc(p.name)}</b>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><span class="price">${fmt(p.price)} ₸</span>${p.active ? '<span class="pill active">В продаже</span>' : '<span class="pill free">Скрыт</span>'}</div>
-        <span class="muted sm">${p.photos.length} фото из 4</span>
+        <span class="muted sm">${p.manufacturer_name ? esc(p.manufacturer_name) : '<span style="color:var(--danger)">Производитель не указан</span>'} · ${p.photos.length} фото из 4</span>
         <button class="btn sm line" data-act="aProdEdit" data-id="${p.id}">${ic('edit', 16)}Редактировать</button></div></div>`).join('') || '<div class="card muted">Добавьте первый товар</div>'}</div>`);
   },
   slotsHTML(p) {
@@ -210,6 +248,8 @@ const Admin = {
     const specs = p.specs.length ? p.specs : [['', '']];
     openModal(`<div class="sheet-head"><h2>${id ? 'Редактировать товар' : 'Новый товар'}</h2><button class="iconbtn" data-act="closeModal" aria-label="Закрыть">${ic('x', 22)}</button></div>
       <div class="field"><label for="pn2">Название</label><input class="input" id="pn2" value="${esc(p.name)}" maxlength="200"></div>
+      <div class="field"><label for="pm2">Производитель</label><select class="input" id="pm2"><option value="">Не указан</option>${(this.mfrs || []).filter(m => m.active || m.id === p.manufacturer_id).map(m => `<option value="${m.id}" ${p.manufacturer_id === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
+        ${(this.mfrs || []).length ? '' : '<span class="muted sm">Сначала добавьте производителей в разделе «Производители».</span>'}</div>
       <div class="field"><label for="pd2">Описание</label><textarea class="input" id="pd2" rows="3" maxlength="3000">${esc(p.description)}</textarea></div>
       <div class="field-grid"><div class="field"><label for="pp2">Цена, ₸ с НДС</label><input class="input" id="pp2" inputmode="numeric" value="${p.price}"></div>
         <div class="field"><label for="ps2">Порядок в каталоге</label><input class="input" id="ps2" inputmode="numeric" value="${p.sort}"></div></div>
@@ -265,7 +305,7 @@ const Admin = {
   },
 
   async vProfile() {
-    return this.shell('Профиль', '', `<div style="max-width:560px"><div class="card" style="margin-bottom:12px"><div class="person"><span class="avatar">${esc(Staff.me.fullName[0])}</span><div><b>${esc(Staff.me.fullName)}</b><div class="muted sm">${isFinance() ? 'Финансист' : 'Администратор'}, логин ${esc(Staff.me.login)}</div></div></div></div>${credForm(false)}</div>`);
+    return this.shell('Профиль', '', `<div style="max-width:560px"><div class="card" style="margin-bottom:12px"><div class="person"><span class="avatar">${esc(Staff.me.fullName[0])}</span><div><b>${esc(Staff.me.fullName)}</b><div class="muted sm">${isMfr() ? `Менеджер производителя «${esc(Staff.me.manufacturer?.name || '')}»` : isFinance() ? 'Финансист' : 'Администратор'}, логин ${esc(Staff.me.login)}</div></div></div></div>${credForm(false)}</div>`);
   },
 };
 
@@ -283,14 +323,16 @@ Object.assign(Staff.ACT, {
   },
   aSellerEdit(t) { Admin.sellerModal(t.dataset.id); },
   async aSellerSave(btn) {
-    const body = { role: $('#srole').value, fullName: $('#sf').value.trim(), login: $('#sl').value.trim(), pointId: Number($('#spt').value) || 0 };
-    if (!body.fullName || !body.login || (body.role === 'seller' && !body.pointId)) { $('#merr').innerHTML = Admin.err(body.role === 'seller' ? 'Заполните ФИО, логин и точку продаж' : 'Заполните ФИО и логин'); return; }
+    const body = { role: $('#srole').value, fullName: $('#sf').value.trim(), login: $('#sl').value.trim(), pointId: Number($('#spt').value) || 0, manufacturerId: Number($('#smf').value) || 0 };
+    if (!body.fullName || !body.login) { $('#merr').innerHTML = Admin.err('Заполните ФИО и логин'); return; }
+    if (body.role === 'seller' && !body.pointId) { $('#merr').innerHTML = Admin.err('Выберите точку продаж'); return; }
+    if (body.role === 'manufacturer' && !body.manufacturerId) { $('#merr').innerHTML = Admin.err('Выберите производителя'); return; }
     await busy(btn, () => guard(async () => {
       let r;
       try { r = btn.dataset.id ? await PUT(`/api/admin/sellers/${btn.dataset.id}`, body) : await POST('/api/admin/sellers', body); }
       catch (e) { $('#merr').innerHTML = Admin.err(e.message); return; }
       await Admin.show();
-      if (r.tempPassword) Admin.showTempPassword(body.role === 'finance' ? 'Финансист создан' : 'Продавец создан', body.login, r.tempPassword); else { closeModal(); toast('Данные сотрудника сохранены'); }
+      if (r.tempPassword) Admin.showTempPassword(`${ROLE_LABEL[body.role]}: учетная запись создана`, body.login, r.tempPassword); else { closeModal(); toast('Данные сотрудника сохранены'); }
     }));
   },
   async aSellerBlock(t) {
@@ -304,11 +346,22 @@ Object.assign(Staff.ACT, {
     await guard(async () => { const r = await POST(`/api/admin/sellers/${s.id}/reset-password`); await Admin.show(); Admin.showTempPassword('Пароль сброшен', s.login, r.tempPassword); });
   },
   aProdEdit(t) { Admin.prodModal(t.dataset.id); },
+  aMfrEdit(t) { Admin.mfrModal(t.dataset.id); },
+  async aMfrSave(btn) {
+    const body = { name: $('#mn').value.trim(), bin: digits($('#mb').value), active: $('#mact2').checked };
+    if (!body.name) { $('#merr').innerHTML = Admin.err('Укажите название'); return; }
+    if (body.bin && body.bin.length !== 12) { $('#merr').innerHTML = Admin.err('БИН должен состоять из 12 цифр'); return; }
+    await busy(btn, () => guard(async () => {
+      try { btn.dataset.id ? await PUT(`/api/admin/manufacturers/${btn.dataset.id}`, body) : await POST('/api/admin/manufacturers', body); }
+      catch (e) { $('#merr').innerHTML = Admin.err(e.message); return; }
+      closeModal(); toast('Производитель сохранен'); Admin.show();
+    }));
+  },
   aSpecAdd() { $('#specs').insertAdjacentHTML('beforeend', `<div class="spec-row"><input class="input" placeholder="Параметр"><input class="input" placeholder="Значение"><button class="iconbtn" data-act="aSpecRm" aria-label="Удалить">${ic('x', 18)}</button></div>`); },
   aSpecRm(t) { t.closest('.spec-row').remove(); },
   async aProdSave(btn) {
     const specs = $$('#specs .spec-row').map(r => [...r.querySelectorAll('input')].map(i => i.value.trim())).filter(([k]) => k);
-    const body = { name: $('#pn2').value.trim(), description: $('#pd2').value.trim(), price: digits($('#pp2').value), sort: Number(digits($('#ps2').value)) || 0, active: $('#pa2').checked, specs };
+    const body = { name: $('#pn2').value.trim(), description: $('#pd2').value.trim(), price: digits($('#pp2').value), sort: Number(digits($('#ps2').value)) || 0, active: $('#pa2').checked, specs, manufacturerId: Number($('#pm2').value) || null };
     if (!body.name || !Number(body.price)) { $('#merr').innerHTML = Admin.err('Укажите название и цену'); return; }
     await busy(btn, () => guard(async () => {
       let r;
@@ -352,7 +405,7 @@ Object.assign(Staff.IN, {
   aTuQ(t) { clearTimeout(tuTimer); tuTimer = setTimeout(async () => { Admin.tuQ = t.value.trim(); Admin.tuPage = 0; await Admin.show(); const n = $('#tuq'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 400); },
 });
 Object.assign(Staff.CH, {
-  aRole(t) { $('#sptWrap').classList.toggle('hide', t.value === 'finance'); },
+  aRole(t) { $('#sptWrap').classList.toggle('hide', t.value !== 'seller'); $('#smfWrap').classList.toggle('hide', t.value !== 'manufacturer'); },
   aSf(t) { Admin.sf[t.dataset.k] = t.value; if (Admin.sf.from > Admin.sf.to) Admin.sf.to = Admin.sf.from; Admin.sf.page = 0; return Admin.show(); },
   aMovesPoint(t) { Admin.movesPoint = t.value; return Admin.show(); },
   aStockSel() {

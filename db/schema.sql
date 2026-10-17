@@ -216,8 +216,8 @@ CREATE INDEX IF NOT EXISTS orders_issued_at ON orders (issued_at DESC) WHERE iss
 CREATE INDEX IF NOT EXISTS orders_point_product_active ON orders (point_id, product_id) WHERE status IN ('pending', 'paid');
 
 -- ===== v1.3.0: роль «Финансист», фото кассового чека =====
-ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
-ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'seller', 'finance'));
+-- Ограничение ролей задается один раз полным списком в разделе v1.5.0 (скрипт выполняется при каждом запуске,
+-- поэтому здесь нельзя ставить более узкий список — иначе запуск упадет при наличии менеджеров производителя).
 ALTER TABLE users DROP CONSTRAINT IF EXISTS seller_has_point;
 ALTER TABLE users ADD CONSTRAINT seller_has_point CHECK (role <> 'seller' OR point_id IS NOT NULL);
 
@@ -229,4 +229,58 @@ CREATE TABLE IF NOT EXISTS receipt_photos (
   size        int NOT NULL,
   uploaded_by int REFERENCES users(id),
   created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- ===== v1.5.0: родственники, фото документов получателя, производители, менеджер производителя, отмена заказа =====
+
+-- Производители (справочник ведет администратор)
+CREATE TABLE IF NOT EXISTS manufacturers (
+  id         serial PRIMARY KEY,
+  name       text NOT NULL,
+  bin        char(12),
+  active     boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS manufacturers_name_uq ON manufacturers (lower(name));
+ALTER TABLE products ADD COLUMN IF NOT EXISTS manufacturer_id int REFERENCES manufacturers(id);
+
+-- Роль «Менеджер производителя»: видит только товары своего производителя
+ALTER TABLE users ADD COLUMN IF NOT EXISTS manufacturer_id int REFERENCES manufacturers(id);
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'seller', 'finance', 'manufacturer'));
+ALTER TABLE users DROP CONSTRAINT IF EXISTS manufacturer_has_mfr;
+ALTER TABLE users ADD CONSTRAINT manufacturer_has_mfr CHECK (role <> 'manufacturer' OR manufacturer_id IS NOT NULL);
+
+-- Получатель: владелец, представитель по доверенности, родственник.
+-- proxy_iin — ИИН получателя (представителя или родственника), proxy_number/proxy_date — только у старых выдач.
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_recipient_check;
+ALTER TABLE orders ADD CONSTRAINT orders_recipient_check CHECK (recipient IN ('owner', 'proxy', 'relative'));
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS relation text;
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_relation_check;
+ALTER TABLE orders ADD CONSTRAINT orders_relation_check CHECK (relation IS NULL OR relation IN ('spouse', 'parent', 'child', 'sibling'));
+
+-- Отмена неоплаченного заказа покупателем или продавцом
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_source text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by int REFERENCES users(id);
+
+-- Фото документа получателя (доверенность, свидетельство о браке/рождении): 1–2 фото, JPEG до 500 КБ
+CREATE TABLE IF NOT EXISTS recipient_docs (
+  order_num   bigint NOT NULL REFERENCES orders(num),
+  position    int NOT NULL CHECK (position IN (0, 1)),
+  mime        text NOT NULL,
+  data        bytea NOT NULL,
+  size        int NOT NULL,
+  uploaded_by int REFERENCES users(id),
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (order_num, position)
+);
+CREATE INDEX IF NOT EXISTS recipient_docs_created ON recipient_docs (created_at);
+CREATE INDEX IF NOT EXISTS receipt_photos_created ON receipt_photos (created_at);
+
+-- Пропуск капчи на 15 минут после успешной проверки (для того же ИИН)
+CREATE TABLE IF NOT EXISTS captcha_passes (
+  token_hash text PRIMARY KEY,
+  iin        char(12) NOT NULL,
+  expires_at timestamptz NOT NULL
 );

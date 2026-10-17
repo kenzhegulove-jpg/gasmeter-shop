@@ -1,6 +1,21 @@
 /* Кабинет продавца: выдача, возврат, профиль */
 'use strict';
+/** Степени родства: подпись и документ, подтверждающий родство */
+const RELATIONS = {
+  spouse: { label: 'Супруг(а)', doc: 'свидетельство о браке' },
+  parent: { label: 'Родитель', doc: 'свидетельство о рождении владельца ТУ' },
+  child: { label: 'Ребенок', doc: 'свидетельство о рождении получателя' },
+  sibling: { label: 'Брат или сестра', doc: 'свидетельства о рождении получателя и владельца ТУ' },
+};
+function recipientText(o) {
+  if (o.recipient === 'proxy') return `Представитель по доверенности${o.proxy?.number ? ` № ${o.proxy.number}` : ''}${o.proxy?.iin ? `, ИИН ${maskIIN(o.proxy.iin)}` : ''}`;
+  if (o.recipient === 'relative') return `Родственник (${(RELATIONS[o.relation]?.label || '').toLowerCase()})${o.proxy?.iin ? `, ИИН ${maskIIN(o.proxy.iin)}` : ''}`;
+  return 'Владелец ТУ';
+}
+const docLinks = o => Array.from({ length: o.recipientDocs || 0 }, (_, i) => `<a class="btn sm sec" href="/api/receipts/docs/${o.num}/${i}" target="_blank" rel="noopener">${ic('doc', 16)}Документ ${o.recipientDocs > 1 ? i + 1 : ''}</a>`).join('');
+
 const Seller = {
+  docs: [],
   tab: 'search', q: '', results: null, order: null, f: null, done: false,
   retQ: '', ret: null, retErr: null,
   rFrom: null, rTo: null, rPage: 0, rQ: '',
@@ -46,7 +61,8 @@ const Seller = {
     await guard(async () => {
       this.order = await GET(`/api/seller/orders/${num}`);
       setServerNow(this.order.now);
-      this.f = { recipient: 'owner', proxyNumber: '', proxyDate: '', proxyIin: '', serialNumber: '', checklist: {} };
+      this.f = { recipient: 'owner', relation: '', recipientIin: '', serialNumber: '', checklist: {} };
+      this.clearDocs();
       this.clearReceipt();
       this.done = false;
       this.tab = 'order';
@@ -70,8 +86,12 @@ const Seller = {
     const o = this.order, f = this.f, m = [];
     if (o.status !== 'paid') m.push('оплата');
     if (!f.serialNumber.trim()) m.push('серийный номер');
-    if (f.recipient === 'proxy' && (!f.proxyNumber.trim() || !f.proxyDate || f.proxyIin.length !== 12)) m.push('данные доверенности');
-    const keys = ['id', 'passport', 'stamp', 'sticker', ...(f.recipient === 'proxy' ? ['proxy'] : [])];
+    if (f.recipient !== 'owner') {
+      if (f.recipientIin.length !== 12) m.push('ИИН получателя');
+      if (f.recipient === 'relative' && !f.relation) m.push('степень родства');
+      if (!this.docs.length) m.push('фото документа');
+    }
+    const keys = ['id', 'passport', 'stamp', 'sticker', ...(f.recipient !== 'owner' ? ['docs'] : [])];
     const left = keys.filter(k => !f.checklist[k]).length;
     if (left) m.push(`чек-лист: ${left}`);
     return m;
@@ -89,19 +109,20 @@ const Seller = {
     if (this.done) {
       render(this.shell(`<div class="card" style="text-align:center;padding:28px 20px"><div class="success-ico">${ic('check', 36)}</div><h1 class="title">Счетчик выдан</h1>
         <p class="muted" style="margin:6px 0 18px">Заказ № ${o.num}. ТУ ${esc(o.tuNumber)} заблокировано для повторной покупки.</p>
-        <dl class="kv" style="text-align:left"><dt>Серийный номер</dt><dd>${esc(o.serialNumber)}</dd><dt>Получатель</dt><dd>${o.recipient === 'proxy' ? `Представитель, доверенность № ${esc(o.proxy.number)}` : 'Владелец ТУ'}</dd><dt>Дата выдачи</dt><dd>${fmtDT(o.issuedAt)}</dd></dl>
+        <dl class="kv" style="text-align:left"><dt>Серийный номер</dt><dd>${esc(o.serialNumber)}</dd><dt>Получатель</dt><dd>${esc(recipientText(o))}</dd><dt>Дата выдачи</dt><dd>${fmtDT(o.issuedAt)}</dd></dl>
         <button class="btn block" style="margin-top:20px" data-act="sTab" data-t="search">Следующий заказ</button></div>`, `Заказ № ${o.num}`));
       return;
     }
     const canIssue = o.status === 'paid';
     const statusBox = {
       pending: `<div class="msg warn">${ic('clock', 20)}<div><b>Ожидает оплаты на кассе</b>Заказ отменится через <span data-deadline="${o.expiresAt}">--:--</span>. Выдача возможна после оплаты.
-        ${this.receiptPicker('pay')}</div></div>`,
+        ${this.receiptPicker('pay')}
+        <div style="margin-top:12px;border-top:1px solid rgba(0,0,0,.08);padding-top:10px"><button class="btn sm line" data-act="sCancel">${ic('x', 16)}Отменить заказ</button></div></div></div>`,
       paid: `<div class="msg ok">${ic('check', 20)}<div><b>Оплачен</b>Проверьте документы и заполните чек-лист выдачи.
         ${o.hasReceiptPhoto ? `<div class="btn-row" style="margin-top:10px"><a class="btn sm sec" href="/api/receipts/${o.num}" target="_blank" rel="noopener">${ic('image', 16)}Фото чека</a></div>${this.receiptPicker('replace')}` : (o.receiptNumber ? `<div style="margin-top:6px">Чек № ${esc(o.receiptNumber)}</div>` : '')}</div></div>`,
-      issued: `${msgBox('info', 'Счетчик уже выдан', `${fmtDT(o.issuedAt)}, серийный № ${o.serialNumber}. Для возврата откройте вкладку «Возврат».`)}${o.hasReceiptPhoto ? `<a class="btn sm sec" style="margin-top:8px" href="/api/receipts/${o.num}" target="_blank" rel="noopener">${ic('image', 16)}Фото чека</a>` : ''}`,
+      issued: `${msgBox('info', 'Счетчик уже выдан', `${fmtDT(o.issuedAt)}, серийный № ${o.serialNumber}. Получатель: ${recipientText(o)}. Для возврата откройте вкладку «Возврат».`)}<div class="btn-row" style="margin-top:8px">${o.hasReceiptPhoto ? `<a class="btn sm sec" href="/api/receipts/${o.num}" target="_blank" rel="noopener">${ic('image', 16)}Фото чека</a>` : ''}${docLinks(o)}</div>`,
       returned: msgBox('info', 'Оформлен возврат', `${fmtDT(o.returnedAt)}. ТУ разблокировано.`),
-      cancelled: msgBox('err', 'Заказ отменён', 'Время на оплату истекло. Покупателю нужно оформить новый заказ.'),
+      cancelled: msgBox('err', 'Заказ отменён', { buyer: 'Покупатель отменил заказ.', seller: 'Заказ отменен продавцом.' }[o.cancelSource] || 'Время на оплату истекло. Покупателю нужно оформить новый заказ.'),
     }[o.status];
     const ck = (k, title, sub) => `<label class="check"><input type="checkbox" data-ch="sChk" data-k="${k}" ${f.checklist[k] ? 'checked' : ''}><span>${title}${sub ? `<small>${sub}</small>` : ''}</span></label>`;
     const m = this.missing();
@@ -113,12 +134,15 @@ const Seller = {
         <dl class="kv"><dt>Владелец ТУ</dt><dd>${esc(o.ownerFullName)}</dd><dt>ИИН/БИН</dt><dd>${maskIIN(o.iin)}</dd><dt>Номер ТУ</dt><dd>${esc(o.tuNumber)}</dd><dt>Адрес установки</dt><dd>${esc(o.address)}</dd><dt>Оформлен</dt><dd>${fmtDT(o.createdAt)}</dd></dl></div>
       ${canIssue ? `
       <div class="card"><h2 class="h3">Кто получает счетчик</h2>
-        <div class="seg"><button class="${f.recipient === 'owner' ? 'on' : ''}" data-act="sRec" data-v="owner">Владелец ТУ</button><button class="${f.recipient === 'proxy' ? 'on' : ''}" data-act="sRec" data-v="proxy">Представитель по доверенности</button></div>
-        ${f.recipient === 'proxy' ? `<div class="field-grid">
-          <div class="field"><label for="pn">Номер доверенности</label><input class="input" id="pn" data-in="sF" data-k="proxyNumber" value="${esc(f.proxyNumber)}"></div>
-          <div class="field"><label for="pd">Дата доверенности</label><input class="input" id="pd" type="date" data-in="sF" data-k="proxyDate" value="${esc(f.proxyDate)}" max="${new Date().toISOString().slice(0, 10)}"></div></div>
-          <div class="field" style="margin-bottom:0"><label for="pi">ИИН доверенного лица</label><input class="input" id="pi" data-in="sIin" inputmode="numeric" maxlength="13" placeholder="000000 000000" value="${maskIIN(f.proxyIin)}"></div>`
-        : `<p class="muted sm">Сверьте удостоверение личности с ФИО владельца ТУ: ${esc(o.ownerFullName)}.</p>`}
+        <div class="seg seg3">${[['owner', 'Владелец ТУ'], ['proxy', 'Представитель по доверенности'], ['relative', 'Родственник']].map(([v, l]) => `<button class="${f.recipient === v ? 'on' : ''}" data-act="sRec" data-v="${v}">${l}</button>`).join('')}</div>
+        ${f.recipient === 'owner' ? `<p class="muted sm">Сверьте удостоверение личности с ФИО владельца ТУ: ${esc(o.ownerFullName)}.</p>` : `
+          ${f.recipient === 'relative' ? `<div class="field"><label for="rel">Степень родства с владельцем ТУ</label><select class="input" id="rel" data-ch="sRel"><option value="">Выберите</option>${Object.entries(RELATIONS).map(([k, r]) => `<option value="${k}" ${f.relation === k ? 'selected' : ''}>${r.label}</option>`).join('')}</select>
+            ${f.relation ? `<span class="muted sm">Документ: ${RELATIONS[f.relation].doc}</span>` : ''}</div>` : ''}
+          <div class="field"><label for="pi">ИИН получателя (из его удостоверения)</label><input class="input" id="pi" data-in="sIin" inputmode="numeric" maxlength="13" placeholder="000000 000000" value="${maskIIN(f.recipientIin)}"></div>
+          <div class="field" style="margin-bottom:0"><span class="lbl">${f.recipient === 'proxy' ? 'Фото доверенности' : 'Фото документа о родстве'} — 1 или 2 фото</span>
+            <div class="doc-photos">${this.docs.map((d, i) => `<div class="slot filled"><img src="${d.url}" alt="Фото ${i + 1}"><button class="rm" data-act="sDocRm" data-i="${i}" aria-label="Удалить фото">${ic('x', 14)}</button></div>`).join('')}
+              ${this.docs.length < 2 ? `<label class="slot">${ic('camera', 24)}<span class="sm">Сфотографировать</span><input type="file" accept="image/*" capture="environment" data-ch="sDoc"></label>` : ''}</div>
+            <span class="muted sm">Документ целиком, текст и печати должны читаться. ${f.recipient === 'relative' && f.relation === 'sibling' ? 'Для брата/сестры — оба свидетельства о рождении.' : 'Если документ на двух страницах — сделайте 2 фото.'}</span></div>`}
       </div>
       <div class="card"><h2 class="h3">Серийный номер счетчика</h2>
         <div class="input-row"><input class="input" id="sn" data-in="sF" data-k="serialNumber" placeholder="Серийный номер с корпуса" value="${esc(f.serialNumber)}" autocapitalize="characters"><button class="btn sec" data-act="sScanSerial" aria-label="Сканировать штрих-код">${ic('barcode', 22)}</button></div>
@@ -127,8 +151,8 @@ const Seller = {
         <div class="notice">${esc(o.notice)}</div>
         <p class="muted sm" style="margin-top:8px">Поставьте штамп с этим текстом или впишите его от руки и распишитесь.</p></div>
       <div class="card"><h2 class="h3">Чек-лист выдачи</h2>
-        ${ck('id', 'Удостоверение личности проверено', f.recipient === 'proxy' ? 'Удостоверение представителя' : 'ФИО совпадает с владельцем ТУ')}
-        ${f.recipient === 'proxy' ? ck('proxy', 'Доверенность проверена', 'Данные внесены выше') : ''}
+        ${ck('id', 'Удостоверение личности проверено', { owner: 'ФИО совпадает с владельцем ТУ', proxy: 'Удостоверение представителя, ИИН внесен выше', relative: 'Удостоверение родственника, ИИН внесен выше' }[f.recipient])}
+        ${f.recipient !== 'owner' ? ck('docs', f.recipient === 'proxy' ? 'Доверенность проверена и сфотографирована' : 'Документ о родстве проверен и сфотографирован', f.recipient === 'relative' && f.relation ? RELATIONS[f.relation].doc : '') : ''}
         ${ck('passport', 'Паспорт счетчика заполнен', 'Цена, ИИН владельца, номер ТУ, дата продажи, подпись, приложен кассовый чек')}
         ${ck('stamp', 'Штамп с уведомлением поставлен', 'Или текст вписан от руки с подписью')}
         ${ck('sticker', 'Наклейка с ценой нанесена на счетчик')}
@@ -153,6 +177,7 @@ const Seller = {
       <div class="input-row"><input class="input" id="rq" data-in="sRetQ" placeholder="Серийный номер" value="${esc(this.retQ)}" autocapitalize="characters" aria-label="Серийный номер"><button class="btn sec" data-act="sScanRet" aria-label="Сканировать штрих-код">${ic('barcode', 22)}</button><button class="btn" data-act="sRetFind" aria-label="Найти">${ic('search', 20)}</button></div>
       ${body}`, 'Возврат счетчика'));
   },
+  clearDocs() { (this.docs || []).forEach(d => URL.revokeObjectURL(d.url)); this.docs = []; },
   clearReceipt() { if (this.receipt) URL.revokeObjectURL(this.receipt.url); this.receipt = null; },
 
   period(days) {
@@ -181,7 +206,7 @@ const Seller = {
         ${s.stock.some(x => x.low) ? `<p class="muted sm" style="margin-top:8px">Остаток ${s.lowStockThreshold} шт. и меньше выделен цветом — сообщите администратору.</p>` : ''}</div>` : ''}
       <div class="section-title" style="margin-top:18px"><h2 class="h3">Реестр продаж</h2><a class="btn sm sec" href="/api/seller/sales/export.xlsx?${qs}">${ic('download', 16)}Excel</a></div>
       <div class="input-row" style="margin-bottom:10px"><input class="input" id="rsq" data-in="sRq" placeholder="ИИН, № ТУ, серийный №" value="${esc(this.rQ)}" style="height:44px;font-size:15px"><button class="btn sm" data-act="sRsearch" style="height:44px">${ic('search', 18)}</button></div>
-      ${sales.rows.length ? `<div class="olist">${sales.rows.map(o => `<button class="orow" data-act="sOpen" data-n="${o.num}"><div class="main"><b>№ ${o.num} · ${esc(o.serial_number || '')}</b><div class="sub">${fmtDT(o.issued_at)} · ${esc(o.product_name)}</div><div class="sub">${esc(o.owner_name)}${o.recipient === 'proxy' ? ' (по доверенности)' : ''}</div></div>${pill(o.status)}</button>`).join('')}</div>
+      ${sales.rows.length ? `<div class="olist">${sales.rows.map(o => `<button class="orow" data-act="sOpen" data-n="${o.num}"><div class="main"><b>№ ${o.num} · ${esc(o.serial_number || '')}</b><div class="sub">${fmtDT(o.issued_at)} · ${esc(o.product_name)}</div><div class="sub">${esc(o.owner_name)}${o.recipient === 'proxy' ? ' (по доверенности)' : o.recipient === 'relative' ? ' (родственник)' : ''}</div></div>${pill(o.status)}</button>`).join('')}</div>
         ${pages > 1 ? `<div class="pager"><span class="muted sm">Стр. ${this.rPage + 1} из ${pages}</span><button class="btn sm line" data-act="sRpage" data-d="-1" ${this.rPage ? '' : 'disabled'}>${ic('back', 16)}</button><button class="btn sm line" data-act="sRpage" data-d="1" ${this.rPage + 1 < pages ? '' : 'disabled'}>${ic('chev', 16)}</button></div>` : ''}`
         : '<div class="card muted sm">За выбранный период выдач нет.</div>'}`, 'Отчеты'));
   },
@@ -252,11 +277,30 @@ Object.assign(Staff.ACT, {
       Seller.renderOrder();
     }));
   },
-  sRec(t) { Seller.f.recipient = t.dataset.v; Seller.renderOrder(); },
+  sRec(t) {
+    if (Seller.f.recipient === t.dataset.v) return;
+    Seller.f.recipient = t.dataset.v; Seller.f.relation = ''; Seller.f.recipientIin = '';
+    delete Seller.f.checklist.docs; Seller.clearDocs(); Seller.renderOrder();
+  },
+  sDocRm(t) { const [d] = Seller.docs.splice(Number(t.dataset.i), 1); if (d) URL.revokeObjectURL(d.url); Seller.renderOrder(); },
+  async sCancel(btn) {
+    if (!confirm(`Отменить заказ № ${Seller.order.num}? ТУ освободится, покупатель сможет оформить новый заказ.`)) return;
+    await busy(btn, () => guard(async () => {
+      try { Seller.order = await POST(`/api/seller/orders/${Seller.order.num}/cancel`); }
+      catch (e) { toast(e.message); return Seller.open(Seller.order.num); }
+      Seller.clearReceipt();
+      toast('Заказ отменен');
+      Seller.renderOrder();
+    }));
+  },
   async sIssue(btn) {
     if (Seller.missing().length) return;
+    const fd = new FormData();
+    const f = Seller.f;
+    fd.append('data', JSON.stringify({ serialNumber: f.serialNumber, recipient: f.recipient, relation: f.relation, recipientIin: f.recipientIin, checklist: f.checklist }));
+    if (f.recipient !== 'owner') Seller.docs.forEach((d, i) => fd.append('docs', d.blob, `doc${i + 1}.jpg`));
     await busy(btn, () => guard(async () => {
-      try { Seller.order = await POST(`/api/seller/orders/${Seller.order.num}/issue`, Seller.f); }
+      try { Seller.order = await api('POST', `/api/seller/orders/${Seller.order.num}/issue`, fd); Seller.clearDocs(); }
       catch (e) { $('#ierr').innerHTML = msgBox('err', 'Счетчик не выдан', e.message); $('#ierr').scrollIntoView({ block: 'center' }); return; }
       Seller.done = true;
       Seller.renderOrder();
@@ -285,9 +329,20 @@ Object.assign(Staff.IN, {
   sRetQ(t) { Seller.retQ = t.value; },
   sRq(t) { Seller.rQ = t.value; },
   sF(t) { Seller.f[t.dataset.k] = t.value; Seller.refreshIssue(); },
-  sIin(t) { const d = digits(t.value).slice(0, 12); Seller.f.proxyIin = d; t.value = maskIIN(d); Seller.refreshIssue(); },
+  sIin(t) { const d = digits(t.value).slice(0, 12); Seller.f.recipientIin = d; t.value = maskIIN(d); Seller.refreshIssue(); },
 });
 Object.assign(Staff.CH, {
+  sRel(t) { Seller.f.relation = t.value; Seller.renderOrder(); },
+  async sDoc(t) {
+    const file = t.files[0]; if (!file) return;
+    if (Seller.docs.length >= 2) return toast('Не более 2 фото');
+    toast('Сжимаю фото…');
+    try {
+      const blob = await compressImage(file, 500 * 1024, 2000);
+      Seller.docs.push({ blob, url: URL.createObjectURL(blob) });
+      Seller.renderOrder();
+    } catch (e) { toast(e.message); }
+  },
   sChk(t) { Seller.f.checklist[t.dataset.k] = t.checked; Seller.refreshIssue(); },
   sRetChk(t) { $('#rbtn').disabled = !t.checked; },
   async sReceipt(t) {

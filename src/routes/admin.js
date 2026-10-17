@@ -55,13 +55,13 @@ r.put('/points/:id', async (req, res) => {
 /* ---------- Продавцы ---------- */
 r.get('/sellers', async (_req, res) => {
   const { rows } = await q(`SELECT u.id, u.role, u.full_name, u.login, u.point_id, u.blocked, u.must_change_password, u.last_login_at, u.locked_until > now() AS locked,
-      p.region AS point_region, p.address AS point_address
-    FROM users u LEFT JOIN points p ON p.id=u.point_id WHERE u.role IN ('seller','finance') ORDER BY u.blocked, u.role DESC, u.full_name`);
+      p.region AS point_region, p.address AS point_address, u.manufacturer_id, m.name AS manufacturer_name
+    FROM users u LEFT JOIN points p ON p.id=u.point_id LEFT JOIN manufacturers m ON m.id=u.manufacturer_id WHERE u.role IN ('seller','finance','manufacturer') ORDER BY u.blocked, u.role DESC, u.full_name`);
   res.json(rows);
 });
 
 async function sellerBody(b, id) {
-  const d = { role: b.role === 'finance' ? 'finance' : 'seller', fullName: str(b.fullName, 200), login: str(b.login, 64), pointId: Number(b.pointId) || 0 };
+  const d = { role: ['finance', 'manufacturer'].includes(b.role) ? b.role : 'seller', fullName: str(b.fullName, 200), login: str(b.login, 64), pointId: Number(b.pointId) || 0, manufacturerId: Number(b.manufacturerId) || 0 };
   if (d.fullName.split(/\s+/).length < 2) throw bad('Укажите ФИО полностью', 'full_name');
   const le = pw.validateLogin(d.login);
   if (le) throw bad(le, 'login_format');
@@ -71,20 +71,24 @@ async function sellerBody(b, id) {
     const p = await q('SELECT 1 FROM points WHERE id=$1 AND active', [d.pointId]);
     if (!p.rowCount) throw bad('Выберите действующую точку продаж', 'point');
   } else d.pointId = null;
+  if (d.role === 'manufacturer') {
+    const m = await q('SELECT 1 FROM manufacturers WHERE id=$1 AND active', [d.manufacturerId]);
+    if (!m.rowCount) throw bad('Выберите производителя', 'manufacturer');
+  } else d.manufacturerId = null;
   return d;
 }
 r.post('/sellers', async (req, res) => {
   const d = await sellerBody(req.body || {});
   const temp = pw.generatePassword();
-  const { rows } = await q(`INSERT INTO users (role, full_name, login, password_hash, point_id, must_change_password)
-    VALUES ($5,$1,$2,$3,$4,true) RETURNING id`, [d.fullName, d.login, await pw.hashPassword(temp), d.pointId, d.role]);
-  await audit(req, 'seller_create', 'user', rows[0].id, { login: d.login, role: d.role, pointId: d.pointId });
+  const { rows } = await q(`INSERT INTO users (role, full_name, login, password_hash, point_id, manufacturer_id, must_change_password)
+    VALUES ($5,$1,$2,$3,$4,$6,true) RETURNING id`, [d.fullName, d.login, await pw.hashPassword(temp), d.pointId, d.role, d.manufacturerId]);
+  await audit(req, 'seller_create', 'user', rows[0].id, { login: d.login, role: d.role, pointId: d.pointId, manufacturerId: d.manufacturerId });
   res.status(201).json({ id: rows[0].id, tempPassword: temp });
 });
 r.put('/sellers/:id', async (req, res) => {
   const id = Number(req.params.id);
   const d = await sellerBody(req.body || {}, id);
-  const { rowCount } = await q("UPDATE users SET role=$5, full_name=$2, login=$3, point_id=$4, updated_at=now() WHERE id=$1 AND role IN ('seller','finance')", [id, d.fullName, d.login, d.pointId, d.role]);
+  const { rowCount } = await q("UPDATE users SET role=$5, full_name=$2, login=$3, point_id=$4, manufacturer_id=$6, updated_at=now() WHERE id=$1 AND role IN ('seller','finance','manufacturer')", [id, d.fullName, d.login, d.pointId, d.role, d.manufacturerId]);
   if (rowCount) await q('DELETE FROM sessions WHERE user_id=$1', [id]); // роль/точка могли измениться
   if (!rowCount) throw new HttpError(404, 'Сотрудник не найден');
   await audit(req, 'seller_update', 'user', id, { login: d.login, pointId: d.pointId });
@@ -92,7 +96,7 @@ r.put('/sellers/:id', async (req, res) => {
 });
 r.post('/sellers/:id/block', async (req, res) => {
   const id = Number(req.params.id), blocked = req.body?.blocked === true;
-  const { rowCount } = await q("UPDATE users SET blocked=$2, updated_at=now() WHERE id=$1 AND role IN ('seller','finance')", [id, blocked]);
+  const { rowCount } = await q("UPDATE users SET blocked=$2, updated_at=now() WHERE id=$1 AND role IN ('seller','finance','manufacturer')", [id, blocked]);
   if (!rowCount) throw new HttpError(404, 'Сотрудник не найден');
   if (blocked) await q('DELETE FROM sessions WHERE user_id=$1', [id]);
   await audit(req, blocked ? 'seller_block' : 'seller_unblock', 'user', id);
@@ -102,17 +106,50 @@ r.post('/sellers/:id/reset-password', async (req, res) => {
   const id = Number(req.params.id);
   const temp = pw.generatePassword();
   const { rowCount } = await q(`UPDATE users SET password_hash=$2, must_change_password=true, failed_logins=0, locked_until=NULL, updated_at=now()
-    WHERE id=$1 AND role IN ('seller','finance')`, [id, await pw.hashPassword(temp)]);
+    WHERE id=$1 AND role IN ('seller','finance','manufacturer')`, [id, await pw.hashPassword(temp)]);
   if (!rowCount) throw new HttpError(404, 'Сотрудник не найден');
   await q('DELETE FROM sessions WHERE user_id=$1', [id]);
   await audit(req, 'seller_reset_password', 'user', id);
   res.json({ tempPassword: temp });
 });
 
+/* ---------- Производители ---------- */
+r.get('/manufacturers', async (_req, res) => {
+  const { rows } = await q(`SELECT m.*, (SELECT count(*)::int FROM products p WHERE p.manufacturer_id=m.id) AS products,
+      (SELECT count(*)::int FROM users u WHERE u.manufacturer_id=m.id AND NOT u.blocked) AS managers
+    FROM manufacturers m ORDER BY m.active DESC, m.name`);
+  res.json(rows);
+});
+async function manufacturerBody(b, id) {
+  const d = { name: str(b.name, 200), bin: digits(b.bin) || null, active: b.active !== false };
+  if (!d.name) throw bad('Укажите название производителя', 'name');
+  if (d.bin && d.bin.length !== 12) throw bad('БИН должен состоять из 12 цифр', 'bin');
+  const dup = await q('SELECT 1 FROM manufacturers WHERE lower(name)=lower($1) AND id<>$2', [d.name, id || 0]);
+  if (dup.rowCount) throw bad('Производитель с таким названием уже есть', 'name_taken');
+  return d;
+}
+r.post('/manufacturers', async (req, res) => {
+  const d = await manufacturerBody(req.body || {});
+  const { rows } = await q('INSERT INTO manufacturers (name, bin, active) VALUES ($1,$2,$3) RETURNING *', [d.name, d.bin, d.active]);
+  await audit(req, 'manufacturer_create', 'manufacturer', rows[0].id, d);
+  res.status(201).json(rows[0]);
+});
+r.put('/manufacturers/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const d = await manufacturerBody(req.body || {}, id);
+  const { rows } = await q('UPDATE manufacturers SET name=$2, bin=$3, active=$4, updated_at=now() WHERE id=$1 RETURNING *', [id, d.name, d.bin, d.active]);
+  if (!rows[0]) throw new HttpError(404, 'Производитель не найден');
+  if (!d.active) await q("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE manufacturer_id=$1)", [id]);
+  await audit(req, 'manufacturer_update', 'manufacturer', id, d);
+  res.json(rows[0]);
+});
+
 /* ---------- Товары ---------- */
 r.get('/products', async (_req, res) => {
   const { rows } = await q(`SELECT p.*, COALESCE(array_agg(ph.position ORDER BY ph.position) FILTER (WHERE ph.id IS NOT NULL), '{}') AS photos
     FROM products p LEFT JOIN product_photos ph ON ph.product_id=p.id GROUP BY p.id ORDER BY p.sort, p.id`);
+  const m = new Map((await q('SELECT id, name FROM manufacturers')).rows.map(x => [x.id, x.name]));
+  rows.forEach(p => { p.manufacturer_name = m.get(p.manufacturer_id) || null; });
   res.json(rows);
 });
 function productBody(b) {
@@ -120,19 +157,26 @@ function productBody(b) {
   const specs = Array.isArray(b.specs) ? b.specs.filter(s => Array.isArray(s) && s[0]).slice(0, 20).map(([k, v]) => [str(k, 80), str(v, 120)]) : [];
   if (!d.name) throw bad('Укажите название', 'name');
   if (!(d.price > 0) || d.price > 10000000) throw bad('Укажите цену', 'price');
-  return { ...d, specs: JSON.stringify(specs) };
+  return { ...d, specs: JSON.stringify(specs), manufacturerId: Number(b.manufacturerId) || null };
+}
+async function checkManufacturer(id) {
+  if (!id) return;
+  const m = await q('SELECT 1 FROM manufacturers WHERE id=$1', [id]);
+  if (!m.rowCount) throw bad('Производитель не найден', 'manufacturer');
 }
 r.post('/products', async (req, res) => {
   const d = productBody(req.body || {});
-  const { rows } = await q('INSERT INTO products (name, description, price, active, sort, specs) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [d.name, d.description, d.price, d.active, d.sort, d.specs]);
+  await checkManufacturer(d.manufacturerId);
+  const { rows } = await q('INSERT INTO products (name, description, price, active, sort, specs, manufacturer_id) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id', [d.name, d.description, d.price, d.active, d.sort, d.specs, d.manufacturerId]);
   await audit(req, 'product_create', 'product', rows[0].id, { name: d.name, price: d.price });
   res.status(201).json({ id: rows[0].id });
 });
 r.put('/products/:id', async (req, res) => {
   const d = productBody(req.body || {});
-  const { rowCount } = await q('UPDATE products SET name=$2, description=$3, price=$4, active=$5, sort=$6, specs=$7, updated_at=now() WHERE id=$1', [Number(req.params.id), d.name, d.description, d.price, d.active, d.sort, d.specs]);
+  await checkManufacturer(d.manufacturerId);
+  const { rowCount } = await q('UPDATE products SET name=$2, description=$3, price=$4, active=$5, sort=$6, specs=$7, manufacturer_id=$8, updated_at=now() WHERE id=$1', [Number(req.params.id), d.name, d.description, d.price, d.active, d.sort, d.specs, d.manufacturerId]);
   if (!rowCount) throw new HttpError(404, 'Товар не найден');
-  await audit(req, 'product_update', 'product', req.params.id, { name: d.name, price: d.price, active: d.active });
+  await audit(req, 'product_update', 'product', req.params.id, { name: d.name, price: d.price, active: d.active, manufacturerId: d.manufacturerId });
   res.json({ ok: true });
 });
 

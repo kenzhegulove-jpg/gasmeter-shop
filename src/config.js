@@ -18,7 +18,7 @@ const config = {
   orderTtlMin: Number(env.ORDER_TTL_MIN || 120),
 
   // Проверка покупателя (ИИН + последние 6 цифр номера ТУ)
-  check: { iinMaxFails: 5, ipMaxFails: Number(env.CHECK_IP_MAX_FAILS || 30), lockMin: 60, ticketMin: 15 },
+  check: { iinMaxFails: Number(env.CHECK_IIN_MAX_FAILS || 30), ipMaxFails: Number(env.CHECK_IP_MAX_FAILS || 130), lockMin: 60, ticketMin: 15, captchaPassMin: 15 },
 
   // Вход сотрудников
   login: { maxFails: 5, ipMaxFails: Number(env.LOGIN_IP_MAX_FAILS || 30), lockMin: 60, sessionHours: 10, idleMin: 60 },

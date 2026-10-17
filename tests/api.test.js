@@ -35,7 +35,7 @@ const pay = (who, num, buf) => call(who, 'POST', `/api/seller/orders/${num}/pay`
 
 test.before(async () => {
   await migrate();
-  await q('TRUNCATE orders, tu_records, tu_imports, sessions, audit_log, password_history, users, attempt_locks, check_log, captchas, product_photos, products, points RESTART IDENTITY CASCADE');
+  await q('TRUNCATE recipient_docs, captcha_passes, receipt_photos, stock_moves, stock, settings, manufacturers, orders, tu_records, tu_imports, sessions, audit_log, password_history, users, attempt_locks, check_log, captchas, product_photos, products, points RESTART IDENTITY CASCADE');
   await q("INSERT INTO points (region, address) VALUES ('Астана', 'ул. Тестовая, 1')");
   await q("INSERT INTO products (name, price) VALUES ('Счетчик G4', 54000)");
   await q("INSERT INTO users (role, full_name, login, password_hash, must_change_password) VALUES ('admin','Админ Тестовый','admin',$1,false)", [await pw.hashPassword('Adm1n#Strong!')]);
@@ -120,11 +120,11 @@ test('полный сценарий: загрузка ТУ → заказ → в
   assert.strictEqual(r.status, 200); // ТУ разблокировано
 });
 
-test('блокировка после 5 неудачных проверок и единое сообщение', async () => {
-  for (let i = 1; i <= 4; i++) {
+test('блокировка после 30 неудачных проверок и единое сообщение', async () => {
+  for (let i = 1; i <= 29; i++) {
     const r = await call('anon2', 'POST', '/api/check', { iin: '111111111111', tu6: '000000', captchaId: await captcha(), captchaText: 'TEST' });
     assert.strictEqual(r.data.code, 'not_found');
-    assert.strictEqual(r.data.attemptsLeft, 5 - i);
+    assert.strictEqual(r.data.attemptsLeft, 30 - i);
   }
   let r = await call('anon2', 'POST', '/api/check', { iin: '111111111111', tu6: '000000', captchaId: await captcha(), captchaText: 'TEST' });
   assert.strictEqual(r.data.code, 'locked');
@@ -290,6 +290,190 @@ test('финансист: только просмотр и выгрузка от
   const id = (await q("SELECT id FROM users WHERE login='f.finance'")).rows[0].id;
   r = await call('adm2', 'PUT', `/api/admin/sellers/${id}`, { role: 'seller', fullName: 'Финансова Фатима Фаридовна', login: 'f.finance' });
   assert.strictEqual(r.data.code, 'point');
+});
+
+// ---------- v1.5.0 ----------
+async function importTu(who, rows, name) {
+  const fd = new FormData();
+  fd.append('folder', name);
+  fd.append('files', new Blob([await makeRegistry(rows)]), `${name}.xlsx`);
+  return call(who, 'POST', '/api/admin/tu/import', undefined, fd);
+}
+async function newOrder(iin, tu6, productId = 1) {
+  const c = await call('anon', 'POST', '/api/check', { iin, tu6, captchaId: await captcha(), captchaText: 'TEST' });
+  assert.ok(c.data.options, JSON.stringify(c.data));
+  const r = await call('anon', 'POST', '/api/orders', { ticket: c.data.options[0].ticket, productId, pointId: 1, confirmed: true });
+  assert.strictEqual(r.status, 201, JSON.stringify(r.data));
+  return r.data;
+}
+function issueForm(data, docs = []) {
+  const fd = new FormData();
+  fd.append('data', JSON.stringify(data));
+  docs.forEach((b, i) => fd.append('docs', new Blob([b]), `doc${i}.jpg`));
+  return fd;
+}
+const CHK = { id: true, passport: true, stamp: true, sticker: true };
+
+test('выдача родственнику и представителю: ИИН получателя и 1–2 фото документа', async () => {
+  await q("UPDATE users SET failed_logins=0, locked_until=NULL WHERE login='admin'");
+  await importTu('adm2', [
+    { owner: 'Родственная Роза Романовна', address: 'Астана г., ул. Семейная, 1', iin: '800101400777', number: '01-гор-2026-000007001' },
+    { owner: 'Доверенный Дамир Данияров', address: 'Астана г., ул. Семейная, 2', iin: '800101300888', number: '01-гор-2026-000007002' },
+  ], 'family');
+  const o1 = await newOrder('800101400777', '007001');
+  await pay('seller', o1.num);
+  // родственник без фото и без степени родства — отказ
+  let r = await call('seller', 'POST', `/api/seller/orders/${o1.num}/issue`, undefined, issueForm({ serialNumber: 'REL-1', recipient: 'relative', recipientIin: '900101300555', checklist: { ...CHK, docs: true } }));
+  assert.strictEqual(r.data.code, 'incomplete');
+  assert.ok(r.data.missing.includes('степень родства') && r.data.missing.some(m => m.startsWith('фото')));
+  // не JPEG — отказ
+  r = await call('seller', 'POST', `/api/seller/orders/${o1.num}/issue`, undefined, issueForm({ serialNumber: 'REL-1', recipient: 'relative', relation: 'sibling', recipientIin: '900101300555', checklist: { ...CHK, docs: true } }, [Buffer.from('nope')]));
+  assert.strictEqual(r.data.code, 'docs_format');
+  // три фото — отказ
+  r = await call('seller', 'POST', `/api/seller/orders/${o1.num}/issue`, undefined, issueForm({ serialNumber: 'REL-1', recipient: 'relative', relation: 'sibling', recipientIin: '900101300555', checklist: { ...CHK, docs: true } }, [JPEG, JPEG, JPEG]));
+  assert.strictEqual(r.status, 400);
+  // два фото (брат/сестра — два свидетельства) — выдано
+  r = await call('seller', 'POST', `/api/seller/orders/${o1.num}/issue`, undefined, issueForm({ serialNumber: 'REL-1', recipient: 'relative', relation: 'sibling', recipientIin: '900101300555', checklist: { ...CHK, docs: true } }, [JPEG, JPEG]));
+  assert.strictEqual(r.data.status, 'issued', JSON.stringify(r.data));
+  assert.strictEqual(r.data.recipient, 'relative');
+  assert.strictEqual(r.data.relation, 'sibling');
+  assert.strictEqual(r.data.recipientDocs, 2);
+  assert.strictEqual(r.data.proxy.iin, '900101300555');
+  // фото документа видят продавец, финансист и администратор
+  for (const who of ['seller', 'fin', 'adm2']) {
+    const ph = await fetch(`${base}/api/receipts/docs/${o1.num}/1`, { headers: { Cookie: jar[who] } });
+    assert.strictEqual(ph.status, 200, who);
+  }
+  const anon = await fetch(`${base}/api/receipts/docs/${o1.num}/0`);
+  assert.strictEqual(anon.status, 401);
+  // представитель: одно фото доверенности
+  const o2 = await newOrder('800101300888', '007002');
+  await pay('seller', o2.num);
+  r = await call('seller', 'POST', `/api/seller/orders/${o2.num}/issue`, undefined, issueForm({ serialNumber: 'PRX-1', recipient: 'proxy', recipientIin: '910101300444', checklist: { ...CHK, docs: true } }, [JPEG]));
+  assert.strictEqual(r.data.status, 'issued');
+  assert.strictEqual(r.data.recipientDocs, 1);
+  r = await call('adm2', 'GET', '/api/admin/sales?q=REL-1');
+  assert.strictEqual(r.data.rows[0].recipient_docs, 2);
+  r = await call('adm2', 'GET', '/api/admin/sales/export.xlsx');
+  assert.strictEqual(r.status, 200);
+});
+
+test('отмена неоплаченного заказа покупателем и продавцом; оплаченный отменить нельзя', async () => {
+  await importTu('adm2', [
+    { owner: 'Отменова Ольга Олеговна', address: 'Астана г., ул. Отмены, 1', iin: '850202400111', number: '01-гор-2026-000008001' },
+    { owner: 'Отменов Олжас Олжасович', address: 'Астана г., ул. Отмены, 2', iin: '850202300222', number: '01-гор-2026-000008002' },
+  ], 'cancel');
+  // покупатель
+  let o = await newOrder('850202400111', '008001');
+  let r = await call('anon', 'POST', `/api/orders/${o.num}/cancel?t=bad`);
+  assert.strictEqual(r.status, 404);
+  r = await call('anon', 'POST', `/api/orders/${o.num}/cancel?t=${o.token}`);
+  assert.strictEqual(r.data.status, 'cancelled');
+  assert.strictEqual(r.data.cancelSource, 'buyer');
+  r = await call('anon', 'POST', `/api/orders/${o.num}/cancel?t=${o.token}`);
+  assert.strictEqual(r.data.code, 'cancel_status');
+  // ТУ освобождено — можно оформить снова
+  o = await newOrder('850202400111', '008001');
+  // продавец
+  r = await call('seller', 'POST', `/api/seller/orders/${o.num}/cancel`);
+  assert.strictEqual(r.data.status, 'cancelled');
+  assert.strictEqual(r.data.cancelSource, 'seller');
+  // оплаченный — нельзя
+  const o2 = await newOrder('850202300222', '008002');
+  await pay('seller', o2.num);
+  r = await call('seller', 'POST', `/api/seller/orders/${o2.num}/cancel`);
+  assert.strictEqual(r.data.code, 'cancel_status');
+  r = await call('anon', 'POST', `/api/orders/${o2.num}/cancel?t=${o2.token}`);
+  assert.strictEqual(r.data.code, 'cancel_status');
+  // финансист отменять не может
+  r = await call('fin', 'POST', `/api/seller/orders/${o2.num}/cancel`);
+  assert.strictEqual(r.status, 403);
+});
+
+test('капча: после успешной проверки 15 минут не нужна для того же ИИН', async () => {
+  await importTu('adm2', [
+    { owner: 'Капчина Карина Кайратовна', address: 'Астана г., ул. Капчи, 1', iin: '870303400333', number: '01-гор-2026-000009001' },
+    { owner: 'Капчина Карина Кайратовна', address: 'Астана г., ул. Капчи, 2', iin: '870303400333', number: '01-гор-2026-000009002' },
+  ], 'captcha');
+  let r = await call('anon3', 'POST', '/api/check', { iin: '870303400333', tu6: '009001', captchaId: await captcha(), captchaText: 'TEST' });
+  const pass = r.data.captchaPass;
+  assert.ok(pass);
+  // тот же ИИН — без капчи
+  r = await call('anon3', 'POST', '/api/check', { iin: '870303400333', tu6: '009002', captchaPass: pass });
+  assert.ok(r.data.options, JSON.stringify(r.data));
+  assert.strictEqual(r.data.captchaPass, pass);
+  // другой ИИН — капча нужна
+  r = await call('anon3', 'POST', '/api/check', { iin: '870303400334', tu6: '009001', captchaPass: pass });
+  assert.strictEqual(r.data.code, 'captcha');
+  // ошибка в номере ТУ — пропуск аннулируется
+  r = await call('anon3', 'POST', '/api/check', { iin: '870303400333', tu6: '123456', captchaPass: pass });
+  assert.strictEqual(r.data.code, 'not_found');
+  r = await call('anon3', 'POST', '/api/check', { iin: '870303400333', tu6: '009001', captchaPass: pass });
+  assert.strictEqual(r.data.code, 'captcha');
+});
+
+test('производители и менеджер производителя: только свои товары, обезличенные данные', async () => {
+  let r = await call('adm2', 'POST', '/api/admin/manufacturers', { name: 'Альфа Газ', bin: '123456789012' });
+  assert.strictEqual(r.status, 201);
+  const alpha = r.data.id;
+  r = await call('adm2', 'POST', '/api/admin/manufacturers', { name: 'альфа газ' });
+  assert.strictEqual(r.data.code, 'name_taken');
+  r = await call('adm2', 'POST', '/api/admin/manufacturers', { name: 'Бета', bin: '123' });
+  assert.strictEqual(r.data.code, 'bin');
+  const beta = (await call('adm2', 'POST', '/api/admin/manufacturers', { name: 'Бета Метр' })).data.id;
+  // товар 1 — Альфа, новый товар — Бета
+  const p1 = (await call('adm2', 'GET', '/api/admin/products')).data.find(p => p.id === 1);
+  r = await call('adm2', 'PUT', '/api/admin/products/1', { ...p1, manufacturerId: alpha });
+  assert.strictEqual(r.status, 200);
+  const p2 = (await call('adm2', 'POST', '/api/admin/products', { name: 'Счетчик Бета G4', price: 50000, manufacturerId: beta })).data.id;
+  r = await call('anon', 'GET', '/api/catalog');
+  assert.strictEqual(r.data.find(p => p.id === 1).manufacturer_name, 'Альфа Газ');
+  assert.strictEqual(r.data.find(p => p.id === p2).manufacturer_name, 'Бета Метр');
+  // продажа товара Беты (не должна быть видна менеджеру Альфы)
+  await importTu('adm2', [{ owner: 'Бетова Белла Бековна', address: 'Астана г., ул. Бета, 1', iin: '880404400444', number: '01-гор-2026-000009101' }], 'beta');
+  const ob = await newOrder('880404400444', '009101', p2);
+  await pay('seller', ob.num);
+  await call('seller', 'POST', `/api/seller/orders/${ob.num}/issue`, { serialNumber: 'BETA-1', checklist: CHK });
+  // менеджер Альфы
+  r = await call('adm2', 'POST', '/api/admin/sellers', { role: 'manufacturer', fullName: 'Менеджеров Марат Маратович', login: 'm.alpha' });
+  assert.strictEqual(r.data.code, 'manufacturer');
+  r = await call('adm2', 'POST', '/api/admin/sellers', { role: 'manufacturer', fullName: 'Менеджеров Марат Маратович', login: 'm.alpha', manufacturerId: alpha });
+  const temp = r.data.tempPassword;
+  await call('mfr', 'POST', '/api/auth/login', { login: 'm.alpha', password: temp, captchaId: await captcha(), captchaText: 'TEST' });
+  await call('mfr', 'POST', '/api/auth/change-credentials', { currentPassword: temp, newPassword: 'Proizvod#2026kz' });
+  r = await call('mfr', 'GET', '/api/auth/me');
+  assert.strictEqual(r.data.manufacturer.name, 'Альфа Газ');
+  r = await call('mfr', 'GET', '/api/mfr/sales?from=2020-01-01');
+  assert.ok(r.data.rows.length >= 1);
+  assert.ok(r.data.rows.every(o => o.manufacturer_name === 'Альфа Газ'), 'только свои товары');
+  assert.ok(!r.data.rows.some(o => o.serial_number === 'BETA-1'));
+  const keys = Object.keys(r.data.rows[0]);
+  for (const k of ['owner_name', 'iin', 'address', 'proxy_iin', 'seller_name', 'recipient', 'has_receipt_photo']) assert.ok(!keys.includes(k), `поле ${k} скрыто`);
+  assert.ok(keys.includes('tu_number'));
+  r = await call('mfr', 'GET', '/api/mfr/sales?from=2020-01-01&q=800101');
+  assert.strictEqual(r.data.rows.length, 0, 'поиск по ИИН недоступен');
+  r = await call('mfr', 'GET', '/api/mfr/reports/summary?from=2020-01-01');
+  assert.ok(r.data.byProduct.every(x => x.product_name !== 'Счетчик Бета G4'));
+  r = await call('mfr', 'GET', '/api/mfr/stock');
+  assert.ok(r.data.products.every(p => p.id !== p2));
+  assert.ok(r.data.cells.every(c => c.product_id !== p2));
+  r = await call('mfr', 'GET', '/api/mfr/stock/moves');
+  assert.ok(r.data.every(m => !('user_name' in m) && !('comment' in m)));
+  r = await call('mfr', 'GET', '/api/mfr/sales/export.xlsx?from=2020-01-01');
+  assert.strictEqual(r.status, 200);
+  // запрещено: админка, кабинет продавца, фото
+  for (const p of ['/api/admin/sales', '/api/admin/reports/summary', '/api/admin/stock', '/api/seller/orders-active', `/api/receipts/${ob.num}`, `/api/receipts/docs/${ob.num}/0`]) {
+    r = await call('mfr', 'GET', p);
+    assert.strictEqual(r.status, 403, p);
+  }
+  // отключенный производитель — менеджер теряет доступ
+  await call('adm2', 'PUT', `/api/admin/manufacturers/${alpha}`, { name: 'Альфа Газ', bin: '123456789012', active: false });
+  r = await call('mfr', 'GET', '/api/mfr/sales');
+  assert.ok([401, 403].includes(r.status));
+  await call('adm2', 'PUT', `/api/admin/manufacturers/${alpha}`, { name: 'Альфа Газ', bin: '123456789012', active: true });
+  // Повторное применение схемы (как при перезапуске сервера) не падает при наличии менеджеров и родственников
+  await migrate();
+  await migrate();
 });
 
 test('CSRF: запрос без заголовка отклоняется', async () => {

@@ -338,3 +338,13 @@ a.btn.line{color:var(--ink)}
 .tag.out{background:#EEF0F2;color:#4F5B65}
 .switch{align-items:flex-start}
 .switch input{flex:none;margin-top:2px}
+
+/* v1.5.0: выбор получателя из трех вариантов, фото документа */
+.seg.seg3 button{font-size:13px;line-height:1.2}
+.doc-photos{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:6px 0}
+.doc-photos .slot{aspect-ratio:4/3;flex-direction:column;gap:4px;display:flex;align-items:center;justify-content:center}
+.mfr-filter{display:flex;gap:8px;overflow-x:auto;margin:0 0 12px;scrollbar-width:none}
+.mfr-filter::-webkit-scrollbar{display:none}
+.mfr-filter button{flex:none;border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 14px;font:inherit;font-size:14px;cursor:pointer;color:var(--ink)}
+.mfr-filter button.on{background:var(--brand-50);border-color:var(--brand);color:var(--brand-ink);font-weight:600}
+.mfr-name{font-size:12px;color:var(--muted)}

@@ -12,7 +12,8 @@ const ORDER_SELECT = `
   SELECT o.*, t.iin, t.owner_name, t.address, t.is_legal, t.branch,
          p.region AS point_region, p.address AS point_address, p.hours AS point_hours,
          ui.full_name AS issued_by_name, ur.full_name AS returned_by_name,
-         EXISTS (SELECT 1 FROM receipt_photos rp WHERE rp.order_num = o.num) AS has_receipt_photo
+         EXISTS (SELECT 1 FROM receipt_photos rp WHERE rp.order_num = o.num) AS has_receipt_photo,
+         (SELECT count(*)::int FROM recipient_docs rd WHERE rd.order_num = o.num) AS recipient_docs
   FROM orders o
   JOIN tu_records t ON t.tu_number = o.tu_number
   JOIN points p ON p.id = o.point_id
@@ -32,6 +33,7 @@ function publicOrder(o) {
     productId: o.product_id, productName: o.product_name, price: o.price,
     ownerName: shortName(o.owner_name, o.is_legal), tuNumber: o.tu_number, address: o.address,
     point: { region: o.point_region, address: o.point_address, hours: o.point_hours },
+    cancelSource: o.status === 'cancelled' ? (o.cancel_source || 'timeout') : null,
   };
 }
 
@@ -43,7 +45,8 @@ function staffOrder(o, user) {
     otherPoint: user?.role === 'seller' && o.point_id !== user.point_id,
     paidAt: o.paid_at, receiptNumber: o.receipt_number, paidSource: o.paid_source, hasReceiptPhoto: o.has_receipt_photo,
     issuedAt: o.issued_at, issuedBy: o.issued_by_name, serialNumber: o.serial_number, recipient: o.recipient,
-    proxy: o.recipient === 'proxy' ? { number: o.proxy_number, date: o.proxy_date, iin: o.proxy_iin } : null,
+    proxy: o.recipient === 'proxy' || o.recipient === 'relative' ? { number: o.proxy_number, date: o.proxy_date, iin: o.proxy_iin } : null,
+    relation: o.relation, recipientDocs: o.recipient_docs || 0, cancelSource: o.status === 'cancelled' ? (o.cancel_source || 'timeout') : null,
     returnedAt: o.returned_at, returnedBy: o.returned_by_name, returnReason: o.return_reason,
     notice: noticeText(o), dear: dear(o.owner_name, o.is_legal),
   };
@@ -66,4 +69,15 @@ function verifyTicket(ticket) {
   } catch { return null; }
 }
 
-module.exports = { expirePending, getOrder, publicOrder, staffOrder, signTicket, verifyTicket, ORDER_SELECT };
+/**
+ * Отмена неоплаченного заказа (покупатель или продавец). ТУ и бронь на точке освобождаются сразу,
+ * т.к. занятость считается по заказам в статусах pending/paid/issued.
+ */
+async function cancelPending(num, source, userId = null) {
+  await expirePending();
+  const r = await q(`UPDATE orders SET status='cancelled', cancelled_at=now(), cancel_source=$2, cancelled_by=$3
+    WHERE num=$1 AND status='pending' RETURNING num`, [num, source, userId]);
+  return r.rowCount > 0;
+}
+
+module.exports = { cancelPending, expirePending, getOrder, publicOrder, staffOrder, signTicket, verifyTicket, ORDER_SELECT };

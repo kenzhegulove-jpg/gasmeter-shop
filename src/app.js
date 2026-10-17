@@ -49,6 +49,7 @@ function createApp() {
   app.use('/api/admin', require('./routes/admin'));
   app.use('/api/pos', require('./routes/pos'));
   app.use('/api/receipts', require('./routes/receipts'));
+  app.use('/api/mfr', require('./routes/manufacturer'));
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Не найдено')));
 
@@ -58,7 +59,7 @@ function createApp() {
 
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, _next) => {
-    if (err instanceof multer.MulterError) err = new HttpError(400, err.code === 'LIMIT_FILE_SIZE' ? (req.path.includes('/pay') || req.path.includes('/receipt') ? 'Фото чека больше 500 КБ' : 'Файл слишком большой') : 'Ошибка загрузки файла', 'upload');
+    if (err instanceof multer.MulterError) err = new HttpError(400, err.code === 'LIMIT_FILE_SIZE' ? (req.path.includes('/pay') || req.path.includes('/receipt') ? 'Фото чека больше 500 КБ' : req.path.includes('/issue') ? 'Фото документа больше 500 КБ' : 'Файл слишком большой') : err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE' ? 'Слишком много фото: не более 2' : 'Ошибка загрузки файла', 'upload');
     if (err.type === 'entity.parse.failed') err = new HttpError(400, 'Некорректный запрос');
     const status = err.status || 500;
     if (status >= 500) console.error(new Date().toISOString(), req.method, req.originalUrl, err);
